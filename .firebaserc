@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "boutique-vetements"
+  },
+  "targets": {
+    "boutique-vetements": {
+      "hosting": {
+        "app": [
+          "dessinlab-3d"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
