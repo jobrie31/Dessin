@@ -3,6 +3,7 @@ import TopRibbon from "./components/TopRibbon";
 import FeatureTree from "./components/FeatureTree";
 import PropertyPanel from "./components/PropertyPanel";
 import SceneEditor from "./components/SceneEditor";
+import SketchStarter from "./components/SketchStarter";
 import {
   BASE_PLANES,
   buildSolidFromExtrude,
@@ -15,9 +16,9 @@ import {
 export default function App() {
   const [activeTab, setActiveTab] = useState("Esquisse");
   const [mode, setMode] = useState("idle");
-  const [activeSketchTool, setActiveSketchTool] = useState("rectangle");
+  const [activeSketchTool, setActiveSketchTool] = useState(null);
   const [planes] = useState(BASE_PLANES);
-  const [selectedTreeId, setSelectedTreeId] = useState("plane_front");
+  const [selectedTreeId, setSelectedTreeId] = useState(null);
 
   const [sketches, setSketches] = useState([]);
   const [features, setFeatures] = useState([]);
@@ -28,7 +29,6 @@ export default function App() {
   const [pendingFeature, setPendingFeature] = useState(null);
 
   const [selectedEntityRef, setSelectedEntityRef] = useState(null);
-  // { sketchId, entityId }
 
   const selectedSketch = useMemo(
     () => sketches.find((s) => s.id === selectedTreeId) || null,
@@ -70,15 +70,46 @@ export default function App() {
 
     setCurrentPlane(plane);
     setCurrentSketch(sk);
-    setSelectedTreeId(plane.id);
+    setSelectedTreeId(null);
     setSelectedEntityRef(null);
+    setPendingFeature(null);
+    setActiveSketchTool(null);
+    setMode("editingSketch");
+    setActiveTab("Esquisse");
+  }
+
+  function handleStartSketchFromSupport(support) {
+    if (!support) return;
+
+    const sk = {
+      id: uid("sketch"),
+      name: nextSketchName(sketches),
+      plane: support.plane,
+      planeId: support.type === "plane" ? support.id : null,
+      coord: support.coord ?? 0,
+      entities: [],
+      dimensions: [],
+    };
+
+    setCurrentPlane({
+      id: support.id,
+      plane: support.plane,
+      coord: support.coord ?? 0,
+      name: support.label,
+    });
+
+    setCurrentSketch(sk);
+    setSelectedTreeId(null);
+    setSelectedEntityRef(null);
+    setPendingFeature(null);
+    setActiveSketchTool(null);
     setMode("editingSketch");
     setActiveTab("Esquisse");
   }
 
   function startSketchFromFace() {
-    setMode("pickFaceForSketch");
     setActiveTab("Esquisse");
+    setMode("startSketch");
     setSelectedEntityRef(null);
   }
 
@@ -88,6 +119,7 @@ export default function App() {
       setCurrentSketch(null);
       setCurrentPlane(null);
       setSelectedEntityRef(null);
+      setActiveSketchTool(null);
       return;
     }
 
@@ -96,19 +128,23 @@ export default function App() {
     setCurrentSketch(null);
     setCurrentPlane(null);
     setSelectedEntityRef(null);
+    setActiveSketchTool(null);
     setMode("idle");
   }
 
   function ensureSketchSavedForFeature() {
     if (currentSketch?.entities?.length) {
       const sk = currentSketch;
+
       setSketches((prev) => {
         if (prev.some((x) => x.id === sk.id)) return prev;
         return [...prev, sk];
       });
+
       setSelectedTreeId(sk.id);
       setCurrentSketch(null);
       setCurrentPlane(null);
+      setActiveSketchTool(null);
       setMode("idle");
       return sk;
     }
@@ -159,16 +195,21 @@ export default function App() {
 
     if (!sketch) return;
 
+    const forcedFeature = {
+      ...pendingFeature,
+      direction: 1,
+    };
+
     const solid = buildSolidFromExtrude(
-      pendingFeature,
+      forcedFeature,
       sketch,
-      pendingFeature.type === "extrudeBoss" ? "boss" : "cut"
+      forcedFeature.type === "extrudeBoss" ? "boss" : "cut"
     );
     if (!solid) return;
 
-    setFeatures((prev) => [...prev, pendingFeature]);
+    setFeatures((prev) => [...prev, forcedFeature]);
     setSolids((prev) => [...prev, solid]);
-    setSelectedTreeId(pendingFeature.id);
+    setSelectedTreeId(forcedFeature.id);
     setPendingFeature(null);
     setSelectedEntityRef(null);
     setMode("idle");
@@ -182,15 +223,6 @@ export default function App() {
   function handleTreeSelect(id) {
     setSelectedTreeId(id);
     setSelectedEntityRef(null);
-  }
-
-  function handlePlanePick(plane) {
-    if (mode === "pickFaceForSketch") {
-      startSketchOnPlane(plane.plane);
-    } else {
-      setSelectedTreeId(plane.id);
-      setSelectedEntityRef(null);
-    }
   }
 
   function handleSelectEntity(sketchId, entityId) {
@@ -257,12 +289,25 @@ export default function App() {
 
   useEffect(() => {
     function onKeyDown(e) {
-      if (e.key === "Delete" || e.key === "Backspace") {
-        const tag = document.activeElement?.tagName?.toLowerCase();
-        const typing =
-          tag === "input" || tag === "textarea" || document.activeElement?.isContentEditable;
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      const typing =
+        tag === "input" ||
+        tag === "textarea" ||
+        document.activeElement?.isContentEditable;
 
-        if (!typing && selectedEntityRef) {
+      if (typing) return;
+
+      if (e.key === "Escape") {
+        if (activeSketchTool) {
+          e.preventDefault();
+          setActiveSketchTool(null);
+        }
+        setSelectedEntityRef(null);
+        return;
+      }
+
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (selectedEntityRef) {
           e.preventDefault();
           deleteSelectedEntity();
         }
@@ -271,7 +316,7 @@ export default function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedEntityRef]);
+  }, [selectedEntityRef, activeSketchTool]);
 
   function applyDimensionChange(sketchId, entityId, dimType, rawValue) {
     const value = Number(rawValue);
@@ -282,35 +327,37 @@ export default function App() {
         const dx = entity.x2 - entity.x1;
         const dy = entity.y2 - entity.y1;
         const angle = Math.atan2(dy, dx);
+
         return {
           ...entity,
-          x2: entity.x1 + Math.cos(angle) * value,
-          y2: entity.y1 + Math.sin(angle) * value,
+          x2: Math.max(0, entity.x1 + Math.cos(angle) * value),
+          y2: Math.max(0, entity.y1 + Math.sin(angle) * value),
         };
       }
 
       if (entity.type === "circle" && dimType === "diameter") {
+        const maxR = Math.min(entity.cx, entity.cy);
         return {
           ...entity,
-          r: value / 2,
+          r: Math.max(0, Math.min(value / 2, maxR)),
         };
       }
 
       if (entity.type === "rectangle" && dimType === "width") {
-        const cx = (entity.x1 + entity.x2) / 2;
+        const minX = Math.max(0, Math.min(entity.x1, entity.x2));
         return {
           ...entity,
-          x1: cx - value / 2,
-          x2: cx + value / 2,
+          x1: minX,
+          x2: minX + value,
         };
       }
 
       if (entity.type === "rectangle" && dimType === "height") {
-        const cy = (entity.y1 + entity.y2) / 2;
+        const minY = Math.max(0, Math.min(entity.y1, entity.y2));
         return {
           ...entity,
-          y1: cy - value / 2,
-          y2: cy + value / 2,
+          y1: minY,
+          y2: minY + value,
         };
       }
 
@@ -326,8 +373,6 @@ export default function App() {
         mode={mode}
         activeSketchTool={activeSketchTool}
         setActiveSketchTool={setActiveSketchTool}
-        onStartSketchFromPlane={startSketchOnPlane}
-        onStartSketchFromFace={startSketchFromFace}
         onFinishSketch={finishSketch}
         onDoBoss={doBoss}
         onDoCut={doCut}
@@ -336,10 +381,16 @@ export default function App() {
         canCut={!!sketchReadyForFeature}
       />
 
+      <div style={{ padding: "10px 16px 0 16px" }}>
+        <SketchStarter
+          solids={solids}
+          onStartSketchFromSupport={handleStartSketchFromSupport}
+        />
+      </div>
+
       <div className="workspace">
         <aside className="left-pane">
           <FeatureTree
-            planes={planes}
             sketches={sketches}
             features={features}
             selectedTreeId={selectedTreeId}
@@ -350,7 +401,6 @@ export default function App() {
         <main className="center-pane">
           <SceneEditor
             mode={mode}
-            planesVisible
             currentPlane={currentPlane}
             currentSketch={currentSketch}
             sketches={sketches}
@@ -358,8 +408,8 @@ export default function App() {
             previewSolid={previewSolid}
             selectedTreeId={selectedTreeId}
             activeSketchTool={activeSketchTool}
+            setActiveSketchTool={setActiveSketchTool}
             setCurrentSketch={setCurrentSketch}
-            onPlanePick={handlePlanePick}
             selectedEntityRef={selectedEntityRef}
             onSelectEntity={handleSelectEntity}
             onApplyDimensionChange={applyDimensionChange}

@@ -21,8 +21,6 @@ export default function TopRibbon({
   mode,
   activeSketchTool,
   setActiveSketchTool,
-  onStartSketchFromPlane,
-  onStartSketchFromFace,
   onFinishSketch,
   onDoBoss,
   onDoCut,
@@ -30,15 +28,12 @@ export default function TopRibbon({
   canExtrude,
   canCut,
 }) {
+  const sketchEditing = mode === "editingSketch";
+
   return (
     <div className="top-shell">
       <div className="tabs-row">
-        {[
-          "Fonctions",
-          "Esquisse",
-          "Marquage",
-          "Évaluer",
-        ].map((tab) => (
+        {["Fonctions", "Esquisse", "Marquage", "Évaluer"].map((tab) => (
           <button
             key={tab}
             className={`sw-tab ${activeTab === tab ? "active" : ""}`}
@@ -56,36 +51,56 @@ export default function TopRibbon({
         <div className="ribbon-group">
           <div className="ribbon-group-title">Esquisse</div>
           <div className="ribbon-group-body">
-            <Btn label="Plan de face" onClick={() => onStartSketchFromPlane("XY")} />
-            <Btn label="Plan de dessus" onClick={() => onStartSketchFromPlane("XZ")} />
-            <Btn label="Plan de droite" onClick={() => onStartSketchFromPlane("YZ")} />
-            <Btn label="Face" onClick={onStartSketchFromFace} active={mode === "pickFaceForSketch"} />
-            <Btn label="Terminer l'esquisse" onClick={onFinishSketch} disabled={!canFinishSketch} />
-          </div>
-        </div>
-
-        <div className="ribbon-group">
-          <div className="ribbon-group-title">Outils d'esquisse</div>
-          <div className="ribbon-group-body">
             <Btn
               label="Ligne"
               active={activeSketchTool === "line"}
-              onClick={() => setActiveSketchTool("line")}
+              onClick={() => {
+                setActiveTab("Esquisse");
+                setActiveSketchTool("line");
+              }}
+              disabled={!sketchEditing}
             />
+
             <Btn
               label="Rectangle"
               active={activeSketchTool === "rectangle"}
-              onClick={() => setActiveSketchTool("rectangle")}
+              onClick={() => {
+                setActiveTab("Esquisse");
+                setActiveSketchTool("rectangle");
+              }}
+              disabled={!sketchEditing}
             />
+
             <Btn
               label="Cercle"
               active={activeSketchTool === "circle"}
-              onClick={() => setActiveSketchTool("circle")}
+              onClick={() => {
+                setActiveTab("Esquisse");
+                setActiveSketchTool("circle");
+              }}
+              disabled={!sketchEditing}
             />
+
             <Btn
               label="Cotation intelligente"
               active={activeSketchTool === "dimension"}
-              onClick={() => setActiveSketchTool("dimension")}
+              onClick={() => {
+                setActiveTab("Esquisse");
+                setActiveSketchTool("dimension");
+              }}
+              disabled={!sketchEditing}
+            />
+
+            <Btn
+              label="Annuler l'outil"
+              onClick={() => setActiveSketchTool(null)}
+              disabled={!activeSketchTool}
+            />
+
+            <Btn
+              label="Terminer l'esquisse"
+              onClick={onFinishSketch}
+              disabled={!canFinishSketch}
             />
           </div>
         </div>
@@ -93,8 +108,23 @@ export default function TopRibbon({
         <div className="ribbon-group">
           <div className="ribbon-group-title">Fonctions</div>
           <div className="ribbon-group-body">
-            <Btn label="Boss.-Extru." onClick={onDoBoss} disabled={!canExtrude} />
-            <Btn label="Enlèv. de matière extrudé" onClick={onDoCut} disabled={!canCut} />
+            <Btn
+              label="Boss.-Extru."
+              onClick={() => {
+                setActiveTab("Fonctions");
+                onDoBoss();
+              }}
+              disabled={!canExtrude}
+            />
+
+            <Btn
+              label="Enlèv. de matière extrudé"
+              onClick={() => {
+                setActiveTab("Fonctions");
+                onDoCut();
+              }}
+              disabled={!canCut}
+            />
           </div>
         </div>
       </div>

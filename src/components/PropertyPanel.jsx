@@ -24,19 +24,8 @@ export default function PropertyPanel({
           <option>Plan d'esquisse</option>
         </select>
 
-        <label>Direction 1</label>
-        <select
-          value={pendingFeature.direction === 1 ? "Borne +" : "Borne -"}
-          onChange={(e) =>
-            setPendingFeature((prev) => ({
-              ...prev,
-              direction: e.target.value === "Borne -" ? -1 : 1,
-            }))
-          }
-        >
-          <option>Borne +</option>
-          <option>Borne -</option>
-        </select>
+        <label>Direction</label>
+        <input type="text" value="Positive seulement" disabled />
 
         <label>Profondeur</label>
         <input
