@@ -3,11 +3,12 @@ import { Canvas, useThree } from "@react-three/fiber";
 import { Html, Line, OrbitControls, OrthographicCamera } from "@react-three/drei";
 import * as THREE from "three";
 import ViewCube from "./ViewCube";
+import FaceSketchPicker from "./FaceSketchPicker";
+import SketchEdgeSnap, { getProjectedSolidEdges } from "./SketchEdgeSnap";
+import LibrarySolidView from "./LibrarySolidView";
+import CoincidentMatePicker from "./CoincidentMatePicker";
+import TransformMoveControls from "./TransformMoveControls";
 import { planePointToWorld, worldToPlane2D } from "../lib/cad";
-
-/* =========================
-   Helpers sketch / snap
-========================= */
 
 function distance2D(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -101,7 +102,7 @@ function getEntitySnapPoints2D(entity) {
   return [];
 }
 
-function getAllSnapGeometry2D(sketch) {
+function getAllSnapGeometry2D(sketch, solidEdges2D = []) {
   const points = [{ x: 0, y: 0, kind: "origin" }];
   const segments = [];
 
@@ -110,11 +111,22 @@ function getAllSnapGeometry2D(sketch) {
     segments.push(...getEntitySegments2D(entity));
   }
 
+  for (const edge of solidEdges2D) {
+    points.push(
+      { x: edge.x1, y: edge.y1, kind: "solid-edge-end" },
+      { x: edge.x2, y: edge.y2, kind: "solid-edge-end" }
+    );
+    segments.push([
+      { x: edge.x1, y: edge.y1 },
+      { x: edge.x2, y: edge.y2 },
+    ]);
+  }
+
   return { points, segments };
 }
 
-function getClosestSnap2D(rawPoint, sketch, threshold = 1.2) {
-  const { points, segments } = getAllSnapGeometry2D(sketch);
+function getClosestSnap2D(rawPoint, sketch, threshold = 1.2, solidEdges2D = []) {
+  const { points, segments } = getAllSnapGeometry2D(sketch, solidEdges2D);
 
   let best = {
     kind: "free",
@@ -186,28 +198,16 @@ function point2DToWorld(sketch, p) {
   return planePointToWorld(sketch.plane, sketch.coord, p.x, p.y);
 }
 
-/* =========================
-   Plancher simple positif
-========================= */
-
 function InfiniteFloor() {
   return (
     <group>
-      <mesh
-        rotation={[-Math.PI / 2, 0, 0]}
-        position={[2000, 0, 2000]}
-        receiveShadow
-      >
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[2000, 0, 2000]} receiveShadow>
         <planeGeometry args={[4000, 4000]} />
         <meshStandardMaterial color="#3f7d3f" />
       </mesh>
     </group>
   );
 }
-
-/* =========================
-   Dimensions inline
-========================= */
 
 function EditableDimensionTag({
   position,
@@ -250,10 +250,6 @@ function EditableDimensionTag({
     </Html>
   );
 }
-
-/* =========================
-   Sketch display
-========================= */
 
 function SketchEntityView({
   sketch,
@@ -390,16 +386,14 @@ function SketchEntityView({
 
       {entity.type === "line" && (
         <EditableDimensionTag
-          position={
-            (() => {
-              const mx = (entity.x1 + entity.x2) / 2;
-              const my = (entity.y1 + entity.y2) / 2;
+          position={(() => {
+            const mx = (entity.x1 + entity.x2) / 2;
+            const my = (entity.y1 + entity.y2) / 2;
 
-              if (sketch.plane === "XY") return [mx, my + 2, sketch.coord];
-              if (sketch.plane === "XZ") return [mx, sketch.coord, my + 2];
-              return [sketch.coord, my + 2, mx];
-            })()
-          }
+            if (sketch.plane === "XY") return [mx, my + 2, sketch.coord];
+            if (sketch.plane === "XZ") return [mx, sketch.coord, my + 2];
+            return [sketch.coord, my + 2, mx];
+          })()}
           text={Math.hypot(entity.x2 - entity.x1, entity.y2 - entity.y1).toFixed(1)}
           selected={selected}
           isEditing={editingDim === "length"}
@@ -444,8 +438,11 @@ function SketchPreview({
   );
 }
 
-function SnapMarkers({ sketch }) {
-  const snapPts = useMemo(() => getAllSnapGeometry2D(sketch).points, [sketch]);
+function SnapMarkers({ sketch, solidEdges2D = [] }) {
+  const snapPts = useMemo(
+    () => getAllSnapGeometry2D(sketch, solidEdges2D).points,
+    [sketch, solidEdges2D]
+  );
 
   return (
     <>
@@ -462,69 +459,6 @@ function SnapMarkers({ sketch }) {
   );
 }
 
-/* =========================
-   Solids
-========================= */
-
-function SolidView({ solid, selected, cutMode }) {
-  const color = cutMode ? "#facc15" : "#b7b19b";
-
-  if (solid.kind === "box") {
-    let args = [1, 1, 1];
-    if (solid.plane === "XY") args = [solid.width, solid.height, solid.depth];
-    if (solid.plane === "XZ") args = [solid.width, solid.depth, solid.height];
-    if (solid.plane === "YZ") args = [solid.depth, solid.height, solid.width];
-
-    return (
-      <mesh position={[solid.center.x, solid.center.y, solid.center.z]} castShadow receiveShadow>
-        <boxGeometry args={args} />
-        <meshStandardMaterial
-          color={color}
-          metalness={0.06}
-          roughness={0.75}
-          transparent
-          opacity={cutMode ? 0.55 : 1}
-        />
-        {selected ? (
-          <lineSegments>
-            <edgesGeometry args={[new THREE.BoxGeometry(...args)]} />
-            <lineBasicMaterial color="yellow" />
-          </lineSegments>
-        ) : null}
-      </mesh>
-    );
-  }
-
-  const rotation =
-    solid.plane === "XY"
-      ? [Math.PI / 2, 0, 0]
-      : solid.plane === "XZ"
-      ? [0, 0, 0]
-      : [0, 0, Math.PI / 2];
-
-  return (
-    <mesh
-      position={[solid.center.x, solid.center.y, solid.center.z]}
-      rotation={rotation}
-      castShadow
-      receiveShadow
-    >
-      <cylinderGeometry args={[solid.radius, solid.radius, solid.depth, 64]} />
-      <meshStandardMaterial
-        color={color}
-        metalness={0.06}
-        roughness={0.75}
-        transparent
-        opacity={cutMode ? 0.55 : 1}
-      />
-    </mesh>
-  );
-}
-
-/* =========================
-   Sketch interaction
-========================= */
-
 function PointerSketchLayer({
   mode,
   currentPlane,
@@ -532,6 +466,7 @@ function PointerSketchLayer({
   setActiveSketchTool,
   currentSketch,
   setCurrentSketch,
+  solids,
 }) {
   const { camera, gl, scene } = useThree();
   const raycaster = useRef(new THREE.Raycaster());
@@ -540,6 +475,11 @@ function PointerSketchLayer({
   const [draftStart, setDraftStart] = useState(null);
   const [draftEnd, setDraftEnd] = useState(null);
   const [hoverSnap, setHoverSnap] = useState(null);
+
+  const solidEdges2D = useMemo(() => {
+    if (!currentPlane) return [];
+    return getProjectedSolidEdges(solids, currentPlane.plane);
+  }, [solids, currentPlane]);
 
   useEffect(() => {
     function onKeyDown(e) {
@@ -593,7 +533,7 @@ function PointerSketchLayer({
     const raw = worldToPlane2D(currentPlane.plane, hit);
     const rawPoint = clampPositive2D({ x: raw.x, y: raw.y });
 
-    const snapped = getClosestSnap2D(rawPoint, currentSketch, 1.5);
+    const snapped = getClosestSnap2D(rawPoint, currentSketch, 1.5, solidEdges2D);
     const safePoint = clampPositive2D(snapped.point);
 
     setHoverSnap({
@@ -785,7 +725,7 @@ function PointerSketchLayer({
         />
       ))}
 
-      {currentSketch ? <SnapMarkers sketch={currentSketch} /> : null}
+      {currentSketch ? <SnapMarkers sketch={currentSketch} solidEdges2D={solidEdges2D} /> : null}
 
       {hoverWorld ? (
         <mesh position={[hoverWorld.x, hoverWorld.y, hoverWorld.z]}>
@@ -796,10 +736,6 @@ function PointerSketchLayer({
     </>
   );
 }
-
-/* =========================
-   Camera
-========================= */
 
 function sanitizeViewPreset(viewPreset) {
   const allowed = ["isoNE", "top", "front", "right"];
@@ -828,7 +764,8 @@ function CameraRig({ mode, plane, viewPreset }) {
         controls.current?.target.set(plane.coord, 60, 90);
       }
 
-      camera.lookAt(controls.current?.target || new THREE.Vector3(90, 60, 0));
+      const target = controls.current?.target;
+      if (target) camera.lookAt(target);
       controls.current?.update();
       return;
     }
@@ -858,7 +795,7 @@ function CameraRig({ mode, plane, viewPreset }) {
     <OrbitControls
       ref={controls}
       makeDefault
-      enableRotate={mode !== "editingSketch"}
+      enableRotate={mode !== "editingSketch" && mode !== "moveObject"}
       enablePan
       enableZoom
       minPolarAngle={0}
@@ -866,10 +803,6 @@ function CameraRig({ mode, plane, viewPreset }) {
     />
   );
 }
-
-/* =========================
-   Main SceneEditor
-========================= */
 
 export default function SceneEditor({
   mode,
@@ -885,13 +818,25 @@ export default function SceneEditor({
   selectedEntityRef,
   onSelectEntity,
   onApplyDimensionChange,
+  onPickSketchFace,
+  pickSketchFaceMode,
+  onSelectSolidFeature,
+  onUpdateFeaturePosition,
+  onApplyCoincidentMate,
 }) {
   const [viewPreset, setViewPreset] = useState("isoNE");
+  const [mateSourceFace, setMateSourceFace] = useState(null);
 
   useEffect(() => {
     const safe = sanitizeViewPreset(viewPreset);
     if (safe !== viewPreset) setViewPreset(safe);
   }, [viewPreset]);
+
+  useEffect(() => {
+    if (mode !== "mateCoincident") {
+      setMateSourceFace(null);
+    }
+  }, [mode]);
 
   const ortho =
     ["front", "top", "right"].includes(viewPreset) ||
@@ -912,6 +857,25 @@ export default function SceneEditor({
 
         <InfiniteFloor />
 
+        {mode === "mateCoincident" && (
+          <Html position={[90, 120, 90]} center>
+            <div
+              style={{
+                background: "rgba(0,0,0,0.8)",
+                color: "#fff",
+                padding: "8px 12px",
+                borderRadius: 10,
+                fontWeight: 700,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {!mateSourceFace
+                ? "Coincident: choisis la face source"
+                : "Coincident: choisis la face cible ou le sol"}
+            </div>
+          </Html>
+        )}
+
         {sketches.map((sk) => (
           <SketchPreview
             key={sk.id}
@@ -931,22 +895,59 @@ export default function SceneEditor({
           />
         ) : null}
 
-        {solids.map((solid) => (
-          <SolidView
-            key={solid.id}
-            solid={solid}
-            selected={selectedTreeId === solid.sourceFeatureId}
-            cutMode={solid.operation === "cut"}
-          />
-        ))}
+        {solids.map((solid) => {
+          const renderSolid = {
+            ...solid,
+            center: solid.baseCenter || solid.center,
+          };
+
+          const disableNormalSolidClick = mode === "mateCoincident";
+
+          return (
+            <TransformMoveControls
+              key={solid.id}
+              enabled={mode === "moveObject" && selectedTreeId === solid.sourceFeatureId}
+              solid={solid}
+              onChangePosition={onUpdateFeaturePosition}
+            >
+              <group
+                onClick={(e) => {
+                  if (disableNormalSolidClick) return;
+                  e.stopPropagation();
+                  onSelectSolidFeature?.(solid.sourceFeatureId);
+                }}
+              >
+                <LibrarySolidView
+                  solid={renderSolid}
+                  selected={selectedTreeId === solid.sourceFeatureId}
+                  cutMode={solid.operation === "cut"}
+                  color={solid.libraryColor || "#b7b19b"}
+                  textureId={solid.libraryTextureId || "none"}
+                  disablePointerEvents={mode === "mateCoincident"}
+                />
+              </group>
+            </TransformMoveControls>
+          );
+        })}
 
         {previewSolid ? (
-          <SolidView
-            solid={previewSolid}
+          <LibrarySolidView
+            solid={{
+              ...previewSolid,
+              center: previewSolid.baseCenter || previewSolid.center,
+            }}
             selected
             cutMode={previewSolid.operation === "cut"}
+            color={previewSolid.libraryColor || "#b7b19b"}
+            textureId={previewSolid.libraryTextureId || "none"}
           />
         ) : null}
+
+        <SketchEdgeSnap
+          enabled={mode === "editingSketch" && !!currentPlane}
+          solids={solids}
+          currentPlane={currentPlane}
+        />
 
         <PointerSketchLayer
           mode={mode}
@@ -955,6 +956,34 @@ export default function SceneEditor({
           setActiveSketchTool={setActiveSketchTool}
           currentSketch={currentSketch}
           setCurrentSketch={setCurrentSketch}
+          solids={solids}
+        />
+
+        <FaceSketchPicker
+          enabled={pickSketchFaceMode}
+          solids={solids}
+          onPickFace={onPickSketchFace}
+        />
+
+        <CoincidentMatePicker
+          enabled={mode === "mateCoincident"}
+          solids={solids}
+          sourceFace={mateSourceFace}
+          onPickSourceFace={(face) => {
+            setMateSourceFace(face);
+            onSelectSolidFeature?.(face.sourceFeatureId);
+          }}
+          onPickTargetFace={(targetFace) => {
+            if (!mateSourceFace) return;
+
+            onApplyCoincidentMate?.(
+              mateSourceFace.sourceFeatureId,
+              mateSourceFace,
+              targetFace
+            );
+
+            setMateSourceFace(null);
+          }}
         />
 
         <CameraRig mode={mode} plane={currentPlane} viewPreset={viewPreset} />

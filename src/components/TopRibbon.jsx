@@ -19,16 +19,21 @@ export default function TopRibbon({
   activeTab,
   setActiveTab,
   mode,
+  setMode,
   activeSketchTool,
   setActiveSketchTool,
+  onStartSketchFromPlane,
   onFinishSketch,
   onDoBoss,
   onDoCut,
+  onSetMoveMode,
+  onSetCoincidentMode,
   canFinishSketch,
   canExtrude,
   canCut,
 }) {
   const sketchEditing = mode === "editingSketch";
+  const sketchPicking = mode === "startSketch";
 
   return (
     <div className="top-shell">
@@ -51,6 +56,47 @@ export default function TopRibbon({
         <div className="ribbon-group">
           <div className="ribbon-group-title">Esquisse</div>
           <div className="ribbon-group-body">
+            <Btn
+              label="Créer une esquisse"
+              active={sketchPicking}
+              onClick={() => {
+                setActiveTab("Esquisse");
+                setActiveSketchTool(null);
+                setMode("startSketch");
+              }}
+              disabled={sketchEditing}
+            />
+
+            <Btn
+              label="Plan de face"
+              onClick={() => {
+                setActiveTab("Esquisse");
+                setActiveSketchTool(null);
+                onStartSketchFromPlane("XY");
+              }}
+              disabled={sketchEditing}
+            />
+
+            <Btn
+              label="Plan de dessus"
+              onClick={() => {
+                setActiveTab("Esquisse");
+                setActiveSketchTool(null);
+                onStartSketchFromPlane("XZ");
+              }}
+              disabled={sketchEditing}
+            />
+
+            <Btn
+              label="Plan de droite"
+              onClick={() => {
+                setActiveTab("Esquisse");
+                setActiveSketchTool(null);
+                onStartSketchFromPlane("YZ");
+              }}
+              disabled={sketchEditing}
+            />
+
             <Btn
               label="Ligne"
               active={activeSketchTool === "line"}
@@ -124,6 +170,28 @@ export default function TopRibbon({
                 onDoCut();
               }}
               disabled={!canCut}
+            />
+
+            <Btn
+              label="Sélection / Bouger"
+              active={mode === "moveObject"}
+              onClick={() => {
+                setActiveTab("Fonctions");
+                setActiveSketchTool(null);
+                onSetMoveMode?.();
+              }}
+              disabled={mode === "editingSketch"}
+            />
+
+            <Btn
+              label="Coincident"
+              active={mode === "mateCoincident"}
+              onClick={() => {
+                setActiveTab("Fonctions");
+                setActiveSketchTool(null);
+                onSetCoincidentMode?.();
+              }}
+              disabled={mode === "editingSketch"}
             />
           </div>
         </div>
