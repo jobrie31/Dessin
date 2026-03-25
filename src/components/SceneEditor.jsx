@@ -1,600 +1,527 @@
-import React, { useMemo, useRef, useState, useEffect } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useThree } from "@react-three/fiber";
-import { Grid, Line, OrbitControls, OrthographicCamera } from "@react-three/drei";
+import { Html, Line, OrbitControls, OrthographicCamera } from "@react-three/drei";
 import * as THREE from "three";
-import ViewSelector3D from "./ViewSelector3D";
+import ViewCube from "./ViewCube";
+import { BASE_PLANES, planePointToWorld, worldToPlane2D } from "../lib/cad";
 
-function getColorByType(type) {
-  if (type === "floor") return "#2563eb";
-  if (type === "wall") return "#16a34a";
-  if (type === "roof") return "#dc2626";
-  return "#64748b";
+/* =========================
+   Helpers sketch / snap
+========================= */
+
+function distance2D(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
-function round2(v) {
-  return Math.round(v * 20) / 20;
-}
-
-function distance3D(a, b) {
-  return Math.sqrt(
-    (a.x - b.x) ** 2 +
-      (a.y - b.y) ** 2 +
-      (a.z - b.z) ** 2
-  );
-}
-
-function midpoint3D(a, b) {
-  return {
-    x: (a.x + b.x) / 2,
-    y: (a.y + b.y) / 2,
-    z: (a.z + b.z) / 2,
-  };
-}
-
-function closestPointOnSegment3D(p, a, b) {
-  const ab = {
-    x: b.x - a.x,
-    y: b.y - a.y,
-    z: b.z - a.z,
-  };
-
-  const ap = {
-    x: p.x - a.x,
-    y: p.y - a.y,
-    z: p.z - a.z,
-  };
-
-  const abLenSq = ab.x * ab.x + ab.y * ab.y + ab.z * ab.z;
+function closestPointOnSegment2D(p, a, b) {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const abLenSq = abx * abx + aby * aby;
   if (abLenSq <= 1e-9) return { ...a };
 
-  let t = (ap.x * ab.x + ap.y * ab.y + ap.z * ab.z) / abLenSq;
+  let t = ((p.x - a.x) * abx + (p.y - a.y) * aby) / abLenSq;
   t = Math.max(0, Math.min(1, t));
 
   return {
-    x: a.x + ab.x * t,
-    y: a.y + ab.y * t,
-    z: a.z + ab.z * t,
+    x: a.x + abx * t,
+    y: a.y + aby * t,
   };
 }
 
-function getMeshProps(rect) {
-  const thickness = rect.thickness || 0.2;
+function getEntitySegments2D(entity) {
+  if (!entity) return [];
 
-  if (rect.plane === "XY") {
-    return {
-      position: [rect.center.x, rect.center.y, rect.center.z],
-      size: [rect.width, rect.height, thickness],
-    };
-  }
-
-  if (rect.plane === "XZ") {
-    return {
-      position: [rect.center.x, rect.center.y, rect.center.z],
-      size: [rect.width, thickness, rect.height],
-    };
-  }
-
-  return {
-    position: [rect.center.x, rect.center.y, rect.center.z],
-    size: [thickness, rect.height, rect.width],
-  };
-}
-
-function getCornersFromRect(rect) {
-  const { plane, center, width, height } = rect;
-  const hw = width / 2;
-  const hh = height / 2;
-
-  if (plane === "XY") {
+  if (entity.type === "line") {
     return [
-      { x: center.x - hw, y: center.y - hh, z: center.z },
-      { x: center.x + hw, y: center.y - hh, z: center.z },
-      { x: center.x + hw, y: center.y + hh, z: center.z },
-      { x: center.x - hw, y: center.y + hh, z: center.z },
+      [
+        { x: entity.x1, y: entity.y1 },
+        { x: entity.x2, y: entity.y2 },
+      ],
     ];
   }
 
-  if (plane === "XZ") {
+  if (entity.type === "rectangle") {
+    const x1 = Math.min(entity.x1, entity.x2);
+    const x2 = Math.max(entity.x1, entity.x2);
+    const y1 = Math.min(entity.y1, entity.y2);
+    const y2 = Math.max(entity.y1, entity.y2);
+
     return [
-      { x: center.x - hw, y: center.y, z: center.z - hh },
-      { x: center.x + hw, y: center.y, z: center.z - hh },
-      { x: center.x + hw, y: center.y, z: center.z + hh },
-      { x: center.x - hw, y: center.y, z: center.z + hh },
+      [{ x: x1, y: y1 }, { x: x2, y: y1 }],
+      [{ x: x2, y: y1 }, { x: x2, y: y2 }],
+      [{ x: x2, y: y2 }, { x: x1, y: y2 }],
+      [{ x: x1, y: y2 }, { x: x1, y: y1 }],
     ];
   }
 
-  return [
-    { x: center.x, y: center.y - hh, z: center.z - hw },
-    { x: center.x, y: center.y - hh, z: center.z + hw },
-    { x: center.x, y: center.y + hh, z: center.z + hw },
-    { x: center.x, y: center.y + hh, z: center.z - hw },
-  ];
+  return [];
 }
 
-function getEdgeSegmentsFromRect(rect) {
-  const c = getCornersFromRect(rect);
-  return [
-    [c[0], c[1]],
-    [c[1], c[2]],
-    [c[2], c[3]],
-    [c[3], c[0]],
-  ];
-}
+function getEntitySnapPoints2D(entity) {
+  if (!entity) return [];
 
-function buildFeatureDatabase(objects) {
-  const corners = [];
-  const midpoints = [];
-  const edges = [];
-
-  objects.forEach((obj) => {
-    const objCorners = getCornersFromRect(obj);
-    const objEdges = getEdgeSegmentsFromRect(obj);
-
-    objCorners.forEach((p, index) => {
-      corners.push({
-        type: "corner",
-        point: p,
-        objectId: obj.id,
-        index,
-      });
-    });
-
-    objEdges.forEach((edge, index) => {
-      const mid = midpoint3D(edge[0], edge[1]);
-      edges.push({
-        type: "edge",
-        a: edge[0],
-        b: edge[1],
-        objectId: obj.id,
-        index,
-      });
-      midpoints.push({
-        type: "midpoint",
-        point: mid,
-        objectId: obj.id,
-        edgeIndex: index,
-      });
-    });
-  });
-
-  return { corners, midpoints, edges };
-}
-
-function extractFaceInfoFromHit(hit) {
-  const object = hit.object;
-  const localNormal = hit.face.normal.clone();
-  const normalMatrix = new THREE.Matrix3().getNormalMatrix(object.matrixWorld);
-  const worldNormal = localNormal.applyMatrix3(normalMatrix).normalize();
-  const point = hit.point;
-
-  const ax = Math.abs(worldNormal.x);
-  const ay = Math.abs(worldNormal.y);
-  const az = Math.abs(worldNormal.z);
-
-  if (az >= ax && az >= ay) {
-    return {
-      plane: "XY",
-      coord: point.z,
-      normal: { x: 0, y: 0, z: Math.sign(worldNormal.z) || 1 },
-    };
-  }
-
-  if (ay >= ax && ay >= az) {
-    return {
-      plane: "XZ",
-      coord: point.y,
-      normal: { x: 0, y: Math.sign(worldNormal.y) || 1, z: 0 },
-    };
-  }
-
-  return {
-    plane: "YZ",
-    coord: point.x,
-    normal: { x: Math.sign(worldNormal.x) || 1, y: 0, z: 0 },
-  };
-}
-
-function axisForPlane(plane) {
-  if (plane === "XY") return "Z";
-  if (plane === "XZ") return "Y";
-  return "X";
-}
-
-function buildRectFromFacePoints(
-  start,
-  end,
-  sketchFace,
-  type,
-  thickness,
-  directionSign = 1
-) {
-  const { plane, coord, normal } = sketchFace;
-
-  if (plane === "XY") {
-    return {
-      type,
-      plane: "XY",
-      center: {
-        x: (start.x + end.x) / 2,
-        y: (start.y + end.y) / 2,
-        z: coord + normal.z * directionSign * (thickness / 2),
-      },
-      width: Math.abs(end.x - start.x),
-      height: Math.abs(end.y - start.y),
-      thickness,
-    };
-  }
-
-  if (plane === "XZ") {
-    return {
-      type,
-      plane: "XZ",
-      center: {
-        x: (start.x + end.x) / 2,
-        y: coord + normal.y * directionSign * (thickness / 2),
-        z: (start.z + end.z) / 2,
-      },
-      width: Math.abs(end.x - start.x),
-      height: Math.abs(end.z - start.z),
-      thickness,
-    };
-  }
-
-  return {
-    type,
-    plane: "YZ",
-    center: {
-      x: coord + normal.x * directionSign * (thickness / 2),
-      y: (start.y + end.y) / 2,
-      z: (start.z + end.z) / 2,
-    },
-    width: Math.abs(end.z - start.z),
-    height: Math.abs(end.y - start.y),
-    thickness,
-  };
-}
-
-function buildCenteredRect(
-  centerPoint,
-  dragPoint,
-  planeInfo,
-  type,
-  thickness,
-  directionSign = 1
-) {
-  const plane = planeInfo.plane;
-  const coord = planeInfo.coord ?? 0;
-
-  if (plane === "XY") {
-    return {
-      type,
-      plane: "XY",
-      center: {
-        x: centerPoint.x,
-        y: centerPoint.y,
-        z: coord + directionSign * (thickness / 2),
-      },
-      width: Math.abs(dragPoint.x - centerPoint.x) * 2,
-      height: Math.abs(dragPoint.y - centerPoint.y) * 2,
-      thickness,
-    };
-  }
-
-  if (plane === "XZ") {
-    return {
-      type,
-      plane: "XZ",
-      center: {
-        x: centerPoint.x,
-        y: coord + directionSign * (thickness / 2),
-        z: centerPoint.z,
-      },
-      width: Math.abs(dragPoint.x - centerPoint.x) * 2,
-      height: Math.abs(dragPoint.z - centerPoint.z) * 2,
-      thickness,
-    };
-  }
-
-  return {
-    type,
-    plane: "YZ",
-    center: {
-      x: coord + directionSign * (thickness / 2),
-      y: centerPoint.y,
-      z: centerPoint.z,
-    },
-    width: Math.abs(dragPoint.z - centerPoint.z) * 2,
-    height: Math.abs(dragPoint.y - centerPoint.y) * 2,
-    thickness,
-  };
-}
-
-function getSketchCorners(sketchRect) {
-  if (!sketchRect) return [];
-
-  const { plane, coord, start, end } = sketchRect;
-
-  if (plane === "XY") {
+  if (entity.type === "line") {
     return [
-      [start.x, start.y, coord],
-      [end.x, start.y, coord],
-      [end.x, end.y, coord],
-      [start.x, end.y, coord],
-      [start.x, start.y, coord],
+      { x: entity.x1, y: entity.y1, kind: "end" },
+      { x: entity.x2, y: entity.y2, kind: "end" },
     ];
   }
 
-  if (plane === "XZ") {
+  if (entity.type === "rectangle") {
+    const x1 = Math.min(entity.x1, entity.x2);
+    const x2 = Math.max(entity.x1, entity.x2);
+    const y1 = Math.min(entity.y1, entity.y2);
+    const y2 = Math.max(entity.y1, entity.y2);
+
     return [
-      [start.x, coord, start.z],
-      [end.x, coord, start.z],
-      [end.x, coord, end.z],
-      [start.x, coord, end.z],
-      [start.x, coord, start.z],
+      { x: x1, y: y1, kind: "corner" },
+      { x: x2, y: y1, kind: "corner" },
+      { x: x2, y: y2, kind: "corner" },
+      { x: x1, y: y2, kind: "corner" },
     ];
   }
 
-  return [
-    [coord, start.y, start.z],
-    [coord, end.y, start.z],
-    [coord, end.y, end.z],
-    [coord, start.y, end.z],
-    [coord, start.y, start.z],
-  ];
+  if (entity.type === "circle") {
+    return [
+      { x: entity.cx, y: entity.cy, kind: "center" },
+      { x: entity.cx + entity.r, y: entity.cy, kind: "quad" },
+      { x: entity.cx - entity.r, y: entity.cy, kind: "quad" },
+      { x: entity.cx, y: entity.cy + entity.r, kind: "quad" },
+      { x: entity.cx, y: entity.cy - entity.r, kind: "quad" },
+    ];
+  }
+
+  return [];
 }
 
-function getCenteredRectPreview(centerPoint, dragPoint, planeInfo) {
-  if (!centerPoint || !dragPoint || !planeInfo) return null;
+function getAllSnapGeometry2D(sketch) {
+  const points = [];
+  const segments = [];
 
-  if (planeInfo.plane === "XY") {
-    const mirrored = {
-      x: centerPoint.x - (dragPoint.x - centerPoint.x),
-      y: centerPoint.y - (dragPoint.y - centerPoint.y),
-    };
-
-    return {
-      plane: "XY",
-      coord: planeInfo.coord,
-      start: {
-        x: Math.min(dragPoint.x, mirrored.x),
-        y: Math.min(dragPoint.y, mirrored.y),
-      },
-      end: {
-        x: Math.max(dragPoint.x, mirrored.x),
-        y: Math.max(dragPoint.y, mirrored.y),
-      },
-    };
+  for (const entity of sketch?.entities || []) {
+    points.push(...getEntitySnapPoints2D(entity));
+    segments.push(...getEntitySegments2D(entity));
   }
 
-  if (planeInfo.plane === "XZ") {
-    const mirrored = {
-      x: centerPoint.x - (dragPoint.x - centerPoint.x),
-      z: centerPoint.z - (dragPoint.z - centerPoint.z),
-    };
-
-    return {
-      plane: "XZ",
-      coord: planeInfo.coord,
-      start: {
-        x: Math.min(dragPoint.x, mirrored.x),
-        z: Math.min(dragPoint.z, mirrored.z),
-      },
-      end: {
-        x: Math.max(dragPoint.x, mirrored.x),
-        z: Math.max(dragPoint.z, mirrored.z),
-      },
-    };
-  }
-
-  const mirrored = {
-    y: centerPoint.y - (dragPoint.y - centerPoint.y),
-    z: centerPoint.z - (dragPoint.z - centerPoint.z),
-  };
-
-  return {
-    plane: "YZ",
-    coord: planeInfo.coord,
-    start: {
-      y: Math.min(dragPoint.y, mirrored.y),
-      z: Math.min(dragPoint.z, mirrored.z),
-    },
-    end: {
-      y: Math.max(dragPoint.y, mirrored.y),
-      z: Math.max(dragPoint.z, mirrored.z),
-    },
-  };
+  return { points, segments };
 }
 
-function buildSketchPreview(start, end, sketchFace) {
-  if (sketchFace.plane === "XY") {
-    return {
-      plane: "XY",
-      coord: sketchFace.coord,
-      start: {
-        x: Math.min(start.x, end.x),
-        y: Math.min(start.y, end.y),
-      },
-      end: {
-        x: Math.max(start.x, end.x),
-        y: Math.max(start.y, end.y),
-      },
-    };
+function getClosestSnap2D(rawPoint, sketch, threshold = 1.2) {
+  const { points, segments } = getAllSnapGeometry2D(sketch);
+
+  let best = {
+    kind: "free",
+    point: rawPoint,
+    dist: Infinity,
+  };
+
+  for (const p of points) {
+    const d = distance2D(rawPoint, p);
+    if (d < best.dist) {
+      best = {
+        kind: p.kind,
+        point: { x: p.x, y: p.y },
+        dist: d,
+      };
+    }
   }
 
-  if (sketchFace.plane === "XZ") {
+  for (const [a, b] of segments) {
+    const proj = closestPointOnSegment2D(rawPoint, a, b);
+    const d = distance2D(rawPoint, proj);
+    if (d < best.dist) {
+      best = {
+        kind: "edge",
+        point: proj,
+        dist: d,
+      };
+    }
+  }
+
+  if (best.dist <= threshold) {
     return {
-      plane: "XZ",
-      coord: sketchFace.coord,
-      start: {
-        x: Math.min(start.x, end.x),
-        z: Math.min(start.z, end.z),
+      snapped: true,
+      point: {
+        x: Math.round(best.point.x * 10) / 10,
+        y: Math.round(best.point.y * 10) / 10,
       },
-      end: {
-        x: Math.max(start.x, end.x),
-        z: Math.max(start.z, end.z),
-      },
+      kind: best.kind,
     };
   }
 
   return {
-    plane: "YZ",
-    coord: sketchFace.coord,
-    start: {
-      y: Math.min(start.y, end.y),
-      z: Math.min(start.z, end.z),
+    snapped: false,
+    point: {
+      x: Math.round(rawPoint.x * 10) / 10,
+      y: Math.round(rawPoint.y * 10) / 10,
     },
-    end: {
-      y: Math.max(start.y, end.y),
-      z: Math.max(start.z, end.z),
-    },
+    kind: "free",
   };
 }
 
-function askThicknessAndDirectionForGlobal(plane) {
-  const input = window.prompt("Épaisseur de la forme :", "0.2");
-  const thickness = Math.max(0.01, Number(input || 0.2));
-  const axis = axisForPlane(plane);
-  const dirInput = window.prompt(
-    `Côté de l'épaisseur sur l'axe ${axis} ?\nÉcris: + ou -`,
-    "+"
+function entityToWorldLines(sketch, entity) {
+  const plane = sketch.plane;
+  const coord = sketch.coord;
+
+  if (entity.type === "line") {
+    return [[
+      planePointToWorld(plane, coord, entity.x1, entity.y1),
+      planePointToWorld(plane, coord, entity.x2, entity.y2),
+    ]];
+  }
+
+  if (entity.type === "rectangle") {
+    const x1 = Math.min(entity.x1, entity.x2);
+    const x2 = Math.max(entity.x1, entity.x2);
+    const y1 = Math.min(entity.y1, entity.y2);
+    const y2 = Math.max(entity.y1, entity.y2);
+
+    return [
+      [planePointToWorld(plane, coord, x1, y1), planePointToWorld(plane, coord, x2, y1)],
+      [planePointToWorld(plane, coord, x2, y1), planePointToWorld(plane, coord, x2, y2)],
+      [planePointToWorld(plane, coord, x2, y2), planePointToWorld(plane, coord, x1, y2)],
+      [planePointToWorld(plane, coord, x1, y2), planePointToWorld(plane, coord, x1, y1)],
+    ];
+  }
+
+  return [];
+}
+
+function point2DToWorld(sketch, p) {
+  return planePointToWorld(sketch.plane, sketch.coord, p.x, p.y);
+}
+
+/* =========================
+   Base planes
+========================= */
+
+function BasePlanes({ visiblePlanes, highlightedPlaneId, onPlaneClick }) {
+  return (
+    <>
+      {BASE_PLANES.map((p) => {
+        const highlighted = highlightedPlaneId === p.id;
+        const color = highlighted ? "#f59e0b" : "#4338ca";
+        const opacity = visiblePlanes ? 0.08 : 0;
+
+        if (p.plane === "XY") {
+          return (
+            <group key={p.id}>
+              <mesh
+                position={[0, 0, p.coord]}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onPlaneClick?.(p);
+                }}
+              >
+                <planeGeometry args={[180, 120]} />
+                <meshBasicMaterial color={color} transparent opacity={opacity} side={THREE.DoubleSide} />
+              </mesh>
+
+              <Line points={[[-40, 0, p.coord], [40, 0, p.coord]]} color="#1d4ed8" />
+              <Line points={[[0, -40, p.coord], [0, 40, p.coord]]} color="#1d4ed8" />
+
+              <Html position={[-35, 22, p.coord]}>
+                <div className="plane-label">{p.name}</div>
+              </Html>
+            </group>
+          );
+        }
+
+        if (p.plane === "XZ") {
+          return (
+            <group key={p.id}>
+              <mesh
+                rotation={[-Math.PI / 2, 0, 0]}
+                position={[0, p.coord, 0]}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onPlaneClick?.(p);
+                }}
+              >
+                <planeGeometry args={[180, 120]} />
+                <meshBasicMaterial color={color} transparent opacity={opacity} side={THREE.DoubleSide} />
+              </mesh>
+
+              <Html position={[-40, p.coord, -10]}>
+                <div className="plane-label">{p.name}</div>
+              </Html>
+            </group>
+          );
+        }
+
+        return (
+          <group key={p.id}>
+            <mesh
+              rotation={[0, Math.PI / 2, 0]}
+              position={[p.coord, 0, 0]}
+              onClick={(e) => {
+                e.stopPropagation();
+                onPlaneClick?.(p);
+              }}
+            >
+              <planeGeometry args={[120, 120]} />
+              <meshBasicMaterial color={color} transparent opacity={opacity} side={THREE.DoubleSide} />
+            </mesh>
+
+            <Html position={[p.coord, 22, 6]}>
+              <div className="plane-label rotate">{p.name}</div>
+            </Html>
+          </group>
+        );
+      })}
+    </>
   );
-  const directionSign = String(dirInput || "+").trim() === "-" ? -1 : 1;
-  return { thickness, directionSign };
 }
 
-function askThicknessAndDirectionForSketch(faceInfo) {
-  const input = window.prompt("Épaisseur / extrusion :", "0.2");
-  const thickness = Math.max(0.01, Number(input || 0.2));
-  const axis = axisForPlane(faceInfo.plane);
-  const dirInput = window.prompt(
-    `Côté de l'extrusion sur la normale de la face (${axis}) ?\nÉcris: extérieur ou intérieur`,
-    "extérieur"
+/* =========================
+   Dimensions inline
+========================= */
+
+function EditableDimensionTag({
+  position,
+  text,
+  selected = false,
+  onStartEdit,
+  isEditing,
+  editValue,
+  setEditValue,
+  onCommit,
+  onCancel,
+}) {
+  return (
+    <Html position={position} center>
+      {!isEditing ? (
+        <button
+          type="button"
+          className={`dim-tag dim-btn ${selected ? "selected" : ""}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onStartEdit?.();
+          }}
+        >
+          {text}
+        </button>
+      ) : (
+        <input
+          autoFocus
+          className="dim-edit-input"
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onClick={(e) => e.stopPropagation()}
+          onBlur={onCommit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onCommit();
+            if (e.key === "Escape") onCancel();
+          }}
+        />
+      )}
+    </Html>
   );
-
-  const v = String(dirInput || "extérieur").trim().toLowerCase();
-  const directionSign =
-    v === "intérieur" || v === "interieur" || v === "-" ? -1 : 1;
-
-  return { thickness, directionSign };
 }
 
-function RectSolid({ rect, isSelected, onSelect, onFaceClick, mode }) {
-  const mesh = getMeshProps(rect);
-  const corners = getCornersFromRect(rect);
-  const linePts = [...corners, corners[0]].map((p) => [p.x, p.y, p.z]);
-  const color = rect.color || getColorByType(rect.type);
+/* =========================
+   Sketch display
+========================= */
+
+function SketchEntityView({
+  sketch,
+  entity,
+  selected,
+  onSelectEntity,
+  onApplyDimensionChange,
+}) {
+  const lines = entityToWorldLines(sketch, entity);
+
+  const [editingDim, setEditingDim] = useState(null);
+  const [editValue, setEditValue] = useState("");
+
+  function startEdit(dimType, initialValue) {
+    setEditingDim(dimType);
+    setEditValue(String(Number(initialValue).toFixed(1)));
+  }
+
+  function commitEdit() {
+    if (!editingDim) return;
+    onApplyDimensionChange?.(sketch.id, entity.id, editingDim, editValue);
+    setEditingDim(null);
+  }
+
+  function cancelEdit() {
+    setEditingDim(null);
+  }
 
   return (
     <group>
-      <mesh
-        position={mesh.position}
-        castShadow
-        receiveShadow
-        onClick={(e) => {
-          e.stopPropagation();
+      {lines.map((pair, i) => (
+        <Line
+          key={i}
+          points={pair.map((p) => [p.x, p.y, p.z])}
+          color={selected ? "#f59e0b" : "#1d4ed8"}
+          lineWidth={selected ? 3 : 2}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelectEntity?.(sketch.id, entity.id);
+          }}
+        />
+      ))}
 
-          if (mode === "pickSketchFace") {
-            onFaceClick(e);
-            return;
+      {entity.type === "circle" && (
+        <mesh
+          position={
+            sketch.plane === "XY"
+              ? [entity.cx, entity.cy, sketch.coord]
+              : sketch.plane === "XZ"
+              ? [entity.cx, sketch.coord, entity.cy]
+              : [sketch.coord, entity.cy, entity.cx]
           }
+          rotation={
+            sketch.plane === "XY"
+              ? [0, 0, 0]
+              : sketch.plane === "XZ"
+              ? [-Math.PI / 2, 0, 0]
+              : [0, Math.PI / 2, 0]
+          }
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelectEntity?.(sketch.id, entity.id);
+          }}
+        >
+          <circleGeometry args={[entity.r, 64]} />
+          <meshBasicMaterial
+            color={selected ? "#f59e0b" : "#3b82f6"}
+            transparent
+            opacity={0.18}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      )}
 
-          onSelect(rect.id);
-        }}
-      >
-        <boxGeometry args={mesh.size} />
-        <meshStandardMaterial color={color} metalness={0.08} roughness={0.65} />
-      </mesh>
+      {entity.type === "rectangle" && (
+        <>
+          <EditableDimensionTag
+            position={
+              sketch.plane === "XY"
+                ? [(entity.x1 + entity.x2) / 2, Math.max(entity.y1, entity.y2) + 2, sketch.coord]
+                : sketch.plane === "XZ"
+                ? [(entity.x1 + entity.x2) / 2, sketch.coord, Math.max(entity.y1, entity.y2) + 2]
+                : [sketch.coord, Math.max(entity.y1, entity.y2) + 2, (entity.x1 + entity.x2) / 2]
+            }
+            text={Math.abs(entity.x2 - entity.x1).toFixed(1)}
+            selected={selected}
+            isEditing={editingDim === "width"}
+            editValue={editValue}
+            setEditValue={setEditValue}
+            onStartEdit={() => startEdit("width", Math.abs(entity.x2 - entity.x1))}
+            onCommit={commitEdit}
+            onCancel={cancelEdit}
+          />
 
-      <Line
-        points={linePts}
-        color={isSelected ? "#f59e0b" : "#111827"}
-        lineWidth={1.5}
-      />
+          <EditableDimensionTag
+            position={
+              sketch.plane === "XY"
+                ? [Math.max(entity.x1, entity.x2) + 2, (entity.y1 + entity.y2) / 2, sketch.coord]
+                : sketch.plane === "XZ"
+                ? [Math.max(entity.x1, entity.x2) + 2, sketch.coord, (entity.y1 + entity.y2) / 2]
+                : [sketch.coord, (entity.y1 + entity.y2) / 2, Math.max(entity.x1, entity.x2) + 2]
+            }
+            text={Math.abs(entity.y2 - entity.y1).toFixed(1)}
+            selected={selected}
+            isEditing={editingDim === "height"}
+            editValue={editValue}
+            setEditValue={setEditValue}
+            onStartEdit={() => startEdit("height", Math.abs(entity.y2 - entity.y1))}
+            onCommit={commitEdit}
+            onCancel={cancelEdit}
+          />
+        </>
+      )}
+
+      {entity.type === "circle" && (
+        <EditableDimensionTag
+          position={
+            sketch.plane === "XY"
+              ? [entity.cx + entity.r + 4, entity.cy, sketch.coord]
+              : sketch.plane === "XZ"
+              ? [entity.cx + entity.r + 4, sketch.coord, entity.cy]
+              : [sketch.coord, entity.cy, entity.cx + entity.r + 4]
+          }
+          text={`Ø${(entity.r * 2).toFixed(1)}`}
+          selected={selected}
+          isEditing={editingDim === "diameter"}
+          editValue={editValue}
+          setEditValue={setEditValue}
+          onStartEdit={() => startEdit("diameter", entity.r * 2)}
+          onCommit={commitEdit}
+          onCancel={cancelEdit}
+        />
+      )}
+
+      {entity.type === "line" && (
+        <EditableDimensionTag
+          position={
+            (() => {
+              const mx = (entity.x1 + entity.x2) / 2;
+              const my = (entity.y1 + entity.y2) / 2;
+
+              if (sketch.plane === "XY") return [mx, my + 2, sketch.coord];
+              if (sketch.plane === "XZ") return [mx, sketch.coord, my + 2];
+              return [sketch.coord, my + 2, mx];
+            })()
+          }
+          text={Math.hypot(entity.x2 - entity.x1, entity.y2 - entity.y1).toFixed(1)}
+          selected={selected}
+          isEditing={editingDim === "length"}
+          editValue={editValue}
+          setEditValue={setEditValue}
+          onStartEdit={() =>
+            startEdit("length", Math.hypot(entity.x2 - entity.x1, entity.y2 - entity.y1))
+          }
+          onCommit={commitEdit}
+          onCancel={cancelEdit}
+        />
+      )}
     </group>
   );
 }
 
-function DynamicPlane({
-  planeInfo,
-  visible,
-  name,
-  color = "#60a5fa",
-  opacity = 0.12,
-  onPointerDown,
-  onPointerMove,
+function SketchPreview({
+  sketch,
+  selectedEntityRef,
+  onSelectEntity,
+  onApplyDimensionChange,
 }) {
-  if (!visible || !planeInfo) return null;
-
-  if (planeInfo.plane === "XY") {
-    return (
-      <mesh
-        name={name}
-        position={[0, 0, planeInfo.coord]}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-      >
-        <planeGeometry args={[200, 200]} />
-        <meshBasicMaterial
-          transparent
-          opacity={opacity}
-          color={color}
-          side={THREE.DoubleSide}
-        />
-      </mesh>
-    );
-  }
-
-  if (planeInfo.plane === "XZ") {
-    return (
-      <mesh
-        name={name}
-        rotation={[-Math.PI / 2, 0, 0]}
-        position={[0, planeInfo.coord, 0]}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-      >
-        <planeGeometry args={[200, 200]} />
-        <meshBasicMaterial
-          transparent
-          opacity={opacity}
-          color={color}
-          side={THREE.DoubleSide}
-        />
-      </mesh>
-    );
-  }
-
   return (
-    <mesh
-      name={name}
-      rotation={[0, Math.PI / 2, 0]}
-      position={[planeInfo.coord, 0, 0]}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-    >
-      <planeGeometry args={[200, 200]} />
-      <meshBasicMaterial
-        transparent
-        opacity={opacity}
-        color={color}
-        side={THREE.DoubleSide}
-      />
-    </mesh>
+    <group>
+      {(sketch.entities || []).map((entity) => {
+        const selected =
+          selectedEntityRef?.sketchId === sketch.id &&
+          selectedEntityRef?.entityId === entity.id;
+
+        return (
+          <SketchEntityView
+            key={entity.id}
+            sketch={sketch}
+            entity={entity}
+            selected={selected}
+            onSelectEntity={onSelectEntity}
+            onApplyDimensionChange={onApplyDimensionChange}
+          />
+        );
+      })}
+    </group>
   );
 }
 
-function CornerMarkers({ points, hoveredKey, visible }) {
-  if (!visible) return null;
+function SnapMarkers({ sketch }) {
+  const snapPts = useMemo(() => getAllSnapGeometry2D(sketch).points, [sketch]);
 
   return (
     <>
-      {points.map((item, i) => {
-        const key = `corner-${item.objectId}-${item.index}-${i}`;
-        const isHovered = hoveredKey === key;
-
+      {snapPts.map((p, i) => {
+        const wp = point2DToWorld(sketch, p);
         return (
-          <mesh key={key} position={[item.point.x, item.point.y, item.point.z]}>
-            <sphereGeometry args={[isHovered ? 0.14 : 0.08, 18, 18]} />
+          <mesh key={i} position={[wp.x, wp.y, wp.z]}>
+            <sphereGeometry args={[0.35, 12, 12]} />
             <meshBasicMaterial color="#f59e0b" />
           </mesh>
         );
@@ -603,175 +530,304 @@ function CornerMarkers({ points, hoveredKey, visible }) {
   );
 }
 
-function MidpointMarkers({ points, hoveredKey, visible }) {
-  if (!visible) return null;
+/* =========================
+   Solids
+========================= */
+
+function SolidView({ solid, selected, cutMode }) {
+  const color = cutMode ? "#facc15" : "#b7b19b";
+
+  if (solid.kind === "box") {
+    let args = [1, 1, 1];
+    if (solid.plane === "XY") args = [solid.width, solid.height, solid.depth];
+    if (solid.plane === "XZ") args = [solid.width, solid.depth, solid.height];
+    if (solid.plane === "YZ") args = [solid.depth, solid.height, solid.width];
+
+    return (
+      <mesh position={[solid.center.x, solid.center.y, solid.center.z]} castShadow receiveShadow>
+        <boxGeometry args={args} />
+        <meshStandardMaterial
+          color={color}
+          metalness={0.06}
+          roughness={0.75}
+          transparent
+          opacity={cutMode ? 0.55 : 1}
+        />
+        {selected ? (
+          <lineSegments>
+            <edgesGeometry args={[new THREE.BoxGeometry(...args)]} />
+            <lineBasicMaterial color="yellow" />
+          </lineSegments>
+        ) : null}
+      </mesh>
+    );
+  }
+
+  const rotation =
+    solid.plane === "XY"
+      ? [Math.PI / 2, 0, 0]
+      : solid.plane === "XZ"
+      ? [0, 0, 0]
+      : [0, 0, Math.PI / 2];
 
   return (
-    <>
-      {points.map((item, i) => {
-        const key = `mid-${item.objectId}-${item.edgeIndex}-${i}`;
-        const isHovered = hoveredKey === key;
-
-        return (
-          <mesh key={key} position={[item.point.x, item.point.y, item.point.z]}>
-            <sphereGeometry args={[isHovered ? 0.13 : 0.07, 14, 14]} />
-            <meshBasicMaterial color={isHovered ? "#fb923c" : "#fdba74"} />
-          </mesh>
-        );
-      })}
-    </>
-  );
-}
-
-function HoverEdge({ edge, visible }) {
-  if (!visible || !edge) return null;
-
-  return (
-    <Line
-      points={[
-        [edge.a.x, edge.a.y, edge.a.z],
-        [edge.b.x, edge.b.y, edge.b.z],
-      ]}
-      color="#f59e0b"
-      lineWidth={4}
-    />
-  );
-}
-
-function HoverPoint({ point, visible }) {
-  if (!visible || !point) return null;
-
-  return (
-    <mesh position={[point.x, point.y, point.z]}>
-      <sphereGeometry args={[0.1, 18, 18]} />
-      <meshBasicMaterial color="#f97316" />
+    <mesh
+      position={[solid.center.x, solid.center.y, solid.center.z]}
+      rotation={rotation}
+      castShadow
+      receiveShadow
+    >
+      <cylinderGeometry args={[solid.radius, solid.radius, solid.depth, 64]} />
+      <meshStandardMaterial
+        color={color}
+        metalness={0.06}
+        roughness={0.75}
+        transparent
+        opacity={cutMode ? 0.55 : 1}
+      />
     </mesh>
   );
 }
 
-function GuideLines({ start, current, planeInfo, visible }) {
-  if (!visible || !start || !current || !planeInfo) return null;
+/* =========================
+   Sketch interaction
+========================= */
 
-  if (planeInfo.plane === "XY") {
-    return (
-      <>
-        <Line
-          points={[
-            [start.x, start.y, planeInfo.coord],
-            [current.x, start.y, planeInfo.coord],
-          ]}
-          color="#94a3b8"
-          dashed
-        />
-        <Line
-          points={[
-            [current.x, start.y, planeInfo.coord],
-            [current.x, current.y, planeInfo.coord],
-          ]}
-          color="#94a3b8"
-          dashed
-        />
-      </>
-    );
+function PointerSketchLayer({
+  mode,
+  currentPlane,
+  activeSketchTool,
+  currentSketch,
+  setCurrentSketch,
+}) {
+  const { camera, gl, scene } = useThree();
+  const raycaster = useRef(new THREE.Raycaster());
+  const pointer = useRef(new THREE.Vector2());
+
+  const [draftStart, setDraftStart] = useState(null);
+  const [draftEnd, setDraftEnd] = useState(null);
+  const [hoverSnap, setHoverSnap] = useState(null);
+
+  function getHitPoint(e) {
+    const rect = gl.domElement.getBoundingClientRect();
+    pointer.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.current.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.current.setFromCamera(pointer.current, camera);
+
+    const mesh = scene.getObjectByName("ACTIVE_SKETCH_PLANE");
+    if (!mesh) return null;
+
+    const hits = raycaster.current.intersectObject(mesh, false);
+    if (!hits.length) return null;
+
+    return hits[0].point;
   }
 
-  if (planeInfo.plane === "XZ") {
-    return (
-      <>
-        <Line
-          points={[
-            [start.x, planeInfo.coord, start.z],
-            [current.x, planeInfo.coord, start.z],
-          ]}
-          color="#94a3b8"
-          dashed
-        />
-        <Line
-          points={[
-            [current.x, planeInfo.coord, start.z],
-            [current.x, planeInfo.coord, current.z],
-          ]}
-          color="#94a3b8"
-          dashed
-        />
-      </>
-    );
+  function getPlanePoint2D(e) {
+    const hit = getHitPoint(e);
+    if (!hit || !currentPlane || !currentSketch) return null;
+
+    const raw = worldToPlane2D(currentPlane.plane, hit);
+    const rawPoint = {
+      x: Math.round(raw.x * 10) / 10,
+      y: Math.round(raw.y * 10) / 10,
+    };
+
+    const snapped = getClosestSnap2D(rawPoint, currentSketch, 1.5);
+    setHoverSnap(snapped);
+
+    return snapped.point;
   }
+
+  function handleDown(e) {
+    if (mode !== "editingSketch" || !currentPlane || !currentSketch) return;
+    e.stopPropagation();
+
+    const p = getPlanePoint2D(e);
+    if (!p) return;
+
+    if (["rectangle", "line", "circle"].includes(activeSketchTool)) {
+      if (!draftStart) {
+        setDraftStart(p);
+        setDraftEnd(p);
+        return;
+      }
+
+      if (activeSketchTool === "rectangle") {
+        setCurrentSketch((prev) => ({
+          ...prev,
+          entities: [
+            ...(prev.entities || []),
+            {
+              id: `rect_${Date.now()}`,
+              type: "rectangle",
+              x1: draftStart.x,
+              y1: draftStart.y,
+              x2: p.x,
+              y2: p.y,
+            },
+          ],
+        }));
+      }
+
+      if (activeSketchTool === "line") {
+        setCurrentSketch((prev) => ({
+          ...prev,
+          entities: [
+            ...(prev.entities || []),
+            {
+              id: `line_${Date.now()}`,
+              type: "line",
+              x1: draftStart.x,
+              y1: draftStart.y,
+              x2: p.x,
+              y2: p.y,
+            },
+          ],
+        }));
+      }
+
+      if (activeSketchTool === "circle") {
+        const r = Math.hypot(p.x - draftStart.x, p.y - draftStart.y);
+        setCurrentSketch((prev) => ({
+          ...prev,
+          entities: [
+            ...(prev.entities || []),
+            {
+              id: `circle_${Date.now()}`,
+              type: "circle",
+              cx: draftStart.x,
+              cy: draftStart.y,
+              r: Math.max(0.1, Math.round(r * 10) / 10),
+            },
+          ],
+        }));
+      }
+
+      setDraftStart(null);
+      setDraftEnd(null);
+    }
+  }
+
+  function handleMove(e) {
+    if (mode !== "editingSketch" || !currentPlane || !currentSketch) return;
+
+    const p = getPlanePoint2D(e);
+    if (!p) return;
+
+    if (draftStart) {
+      setDraftEnd(p);
+    }
+  }
+
+  const previewLines = useMemo(() => {
+    if (!draftStart || !draftEnd || !currentPlane) return [];
+
+    if (activeSketchTool === "line") {
+      return [[
+        planePointToWorld(currentPlane.plane, currentPlane.coord, draftStart.x, draftStart.y),
+        planePointToWorld(currentPlane.plane, currentPlane.coord, draftEnd.x, draftEnd.y),
+      ]];
+    }
+
+    if (activeSketchTool === "rectangle") {
+      const x1 = Math.min(draftStart.x, draftEnd.x);
+      const x2 = Math.max(draftStart.x, draftEnd.x);
+      const y1 = Math.min(draftStart.y, draftEnd.y);
+      const y2 = Math.max(draftStart.y, draftEnd.y);
+
+      return [
+        [planePointToWorld(currentPlane.plane, currentPlane.coord, x1, y1), planePointToWorld(currentPlane.plane, currentPlane.coord, x2, y1)],
+        [planePointToWorld(currentPlane.plane, currentPlane.coord, x2, y1), planePointToWorld(currentPlane.plane, currentPlane.coord, x2, y2)],
+        [planePointToWorld(currentPlane.plane, currentPlane.coord, x2, y2), planePointToWorld(currentPlane.plane, currentPlane.coord, x1, y2)],
+        [planePointToWorld(currentPlane.plane, currentPlane.coord, x1, y2), planePointToWorld(currentPlane.plane, currentPlane.coord, x1, y1)],
+      ];
+    }
+
+    return [];
+  }, [draftStart, draftEnd, currentPlane, activeSketchTool]);
+
+  const hoverWorld =
+    hoverSnap && currentSketch
+      ? point2DToWorld(currentSketch, hoverSnap.point)
+      : null;
 
   return (
     <>
-      <Line
-        points={[
-          [planeInfo.coord, start.y, start.z],
-          [planeInfo.coord, current.y, start.z],
-        ]}
-        color="#94a3b8"
-        dashed
-      />
-      <Line
-        points={[
-          [planeInfo.coord, current.y, start.z],
-          [planeInfo.coord, current.y, current.z],
-        ]}
-        color="#94a3b8"
-        dashed
-      />
+      {currentPlane && mode === "editingSketch" && (
+        <mesh
+          name="ACTIVE_SKETCH_PLANE"
+          position={
+            currentPlane.plane === "XY"
+              ? [0, 0, currentPlane.coord]
+              : currentPlane.plane === "XZ"
+              ? [0, currentPlane.coord, 0]
+              : [currentPlane.coord, 0, 0]
+          }
+          rotation={
+            currentPlane.plane === "XZ"
+              ? [-Math.PI / 2, 0, 0]
+              : currentPlane.plane === "YZ"
+              ? [0, Math.PI / 2, 0]
+              : [0, 0, 0]
+          }
+          onPointerDown={handleDown}
+          onPointerMove={handleMove}
+        >
+          <planeGeometry args={[180, 120]} />
+          <meshBasicMaterial color="#38bdf8" transparent opacity={0.06} side={THREE.DoubleSide} />
+        </mesh>
+      )}
+
+      {previewLines.map((pair, i) => (
+        <Line
+          key={i}
+          points={pair.map((p) => [p.x, p.y, p.z])}
+          color="#f97316"
+          lineWidth={2}
+        />
+      ))}
+
+      {currentSketch ? <SnapMarkers sketch={currentSketch} /> : null}
+
+      {hoverWorld ? (
+        <mesh position={[hoverWorld.x, hoverWorld.y, hoverWorld.z]}>
+          <sphereGeometry args={[0.45, 14, 14]} />
+          <meshBasicMaterial color="#ef4444" />
+        </mesh>
+      ) : null}
     </>
   );
 }
 
-function CameraController({
-  lockCamera,
-  sketchFace,
-  creationPlane,
-  mode,
-  viewPreset,
-  isOrthoView,
-}) {
-  const controlsRef = useRef();
+/* =========================
+   Camera
+========================= */
+
+function CameraRig({ mode, plane, viewPreset }) {
   const { camera } = useThree();
+  const controls = useRef();
 
   useEffect(() => {
-    const activePlane =
-      mode === "drawGlobalFromCenter"
-        ? creationPlane
-        : mode === "drawSketch"
-        ? sketchFace
-        : null;
+    const d = 80;
 
-    if (!activePlane) return;
+    if (mode === "editingSketch" && plane) {
+      if (plane.plane === "XY") {
+        camera.position.set(0, 0, plane.coord + d);
+        camera.up.set(0, 1, 0);
+      } else if (plane.plane === "XZ") {
+        camera.position.set(0, plane.coord + d, 0);
+        camera.up.set(0, 0, -1);
+      } else {
+        camera.position.set(plane.coord + d, 0, 0);
+        camera.up.set(0, 1, 0);
+      }
 
-    const d = 12;
-
-    if (activePlane.plane === "XY") {
-      camera.position.set(0, 0, (activePlane.coord || 0) + d);
-      camera.up.set(0, 1, 0);
-    } else if (activePlane.plane === "XZ") {
-      camera.position.set(0, (activePlane.coord || 0) + d, 0);
-      camera.up.set(0, 0, -1);
-    } else {
-      camera.position.set((activePlane.coord || 0) + d, 0, 0);
-      camera.up.set(0, 1, 0);
-    }
-
-    camera.lookAt(0, 0, 0);
-
-    if (controlsRef.current) {
-      controlsRef.current.target.set(0, 0, 0);
-      controlsRef.current.update();
-    }
-  }, [camera, sketchFace, creationPlane, mode]);
-
-  useEffect(() => {
-    if (
-      mode === "drawGlobalFromCenter" ||
-      mode === "drawSketch" ||
-      mode === "pickSketchFace"
-    ) {
+      camera.lookAt(0, 0, 0);
+      controls.current?.target.set(0, 0, 0);
+      controls.current?.update();
       return;
     }
-
-    const d = 20;
 
     if (viewPreset === "front") {
       camera.position.set(0, 0, d);
@@ -788,526 +844,130 @@ function CameraController({
     } else if (viewPreset === "bottom") {
       camera.position.set(0, -d, 0);
       camera.up.set(0, 0, 1);
-    } else if (viewPreset === "topLeft") {
+    } else if (viewPreset === "isoNW") {
       camera.position.set(-d, d, d);
       camera.up.set(0, 1, 0);
-    } else if (viewPreset === "topRight") {
+    } else if (viewPreset === "isoNE") {
       camera.position.set(d, d, d);
       camera.up.set(0, 1, 0);
-    } else if (viewPreset === "bottomLeft") {
+    } else if (viewPreset === "isoSW") {
       camera.position.set(-d, -d, d);
       camera.up.set(0, 1, 0);
-    } else if (viewPreset === "bottomRight") {
+    } else {
       camera.position.set(d, -d, d);
       camera.up.set(0, 1, 0);
     }
 
     camera.lookAt(0, 0, 0);
-
-    if (controlsRef.current) {
-      controlsRef.current.target.set(0, 0, 0);
-      controlsRef.current.update();
-    }
-  }, [camera, viewPreset, mode]);
+    controls.current?.target.set(0, 0, 0);
+    controls.current?.update();
+  }, [camera, mode, plane, viewPreset]);
 
   return (
     <OrbitControls
-      ref={controlsRef}
+      ref={controls}
       makeDefault
-      enableRotate={!lockCamera && !isOrthoView}
-      enablePan={!lockCamera}
+      enableRotate={mode !== "editingSketch"}
+      enablePan
       enableZoom
-      zoomSpeed={0.9}
     />
   );
 }
 
-function DrawingLayer({
-  objects,
-  addObject,
-  selectedId,
-  setSelectedId,
-  tool,
-  snapEnabled,
-  mode,
-  setMode,
-  creationPlane,
-  sketchFace,
-  onFacePicked,
-}) {
-  const { camera, gl, scene } = useThree();
-  const raycasterRef = useRef(new THREE.Raycaster());
-  const pointerRef = useRef(new THREE.Vector2());
-
-  const [draftStart, setDraftStart] = useState(null);
-  const [draftEnd, setDraftEnd] = useState(null);
-  const [waitingSecondClick, setWaitingSecondClick] = useState(false);
-
-  const [hoveredFeatureKey, setHoveredFeatureKey] = useState(null);
-  const [hoveredEdge, setHoveredEdge] = useState(null);
-  const [hoveredPoint, setHoveredPoint] = useState(null);
-
-  const isDrawingMode =
-    mode === "drawGlobalFromCenter" || mode === "drawSketch";
-
-  const featureDb = useMemo(() => buildFeatureDatabase(objects), [objects]);
-
-  function clearDraft() {
-    setDraftStart(null);
-    setDraftEnd(null);
-    setWaitingSecondClick(false);
-    setHoveredFeatureKey(null);
-    setHoveredEdge(null);
-    setHoveredPoint(null);
-  }
-
-  function getClosestFeature(point) {
-    let best = {
-      kind: "free",
-      point,
-      dist: Infinity,
-      key: null,
-      edge: null,
-    };
-
-    featureDb.corners.forEach((item, i) => {
-      const d = distance3D(point, item.point);
-      if (d < best.dist) {
-        best = {
-          kind: "corner",
-          point: item.point,
-          dist: d,
-          key: `corner-${item.objectId}-${item.index}-${i}`,
-          edge: null,
-        };
-      }
-    });
-
-    featureDb.midpoints.forEach((item, i) => {
-      const d = distance3D(point, item.point);
-      if (d < best.dist) {
-        best = {
-          kind: "midpoint",
-          point: item.point,
-          dist: d,
-          key: `mid-${item.objectId}-${item.edgeIndex}-${i}`,
-          edge: null,
-        };
-      }
-    });
-
-    featureDb.edges.forEach((item, i) => {
-      const proj = closestPointOnSegment3D(point, item.a, item.b);
-      const d = distance3D(point, proj);
-      if (d < best.dist) {
-        best = {
-          kind: "edge",
-          point: proj,
-          dist: d,
-          key: `edge-${item.objectId}-${item.index}-${i}`,
-          edge: item,
-        };
-      }
-    });
-
-    return best;
-  }
-
-  function snapPoint(point) {
-    if (!snapEnabled) {
-      return {
-        x: round2(point.x),
-        y: round2(point.y),
-        z: round2(point.z),
-      };
-    }
-
-    const best = getClosestFeature(point);
-
-    if (best.dist <= 0.45) {
-      return {
-        x: round2(best.point.x),
-        y: round2(best.point.y),
-        z: round2(best.point.z),
-      };
-    }
-
-    return {
-      x: round2(point.x),
-      y: round2(point.y),
-      z: round2(point.z),
-    };
-  }
-
-  function updateHoverFeature(rawPoint) {
-    if (!isDrawingMode || !snapEnabled) {
-      setHoveredFeatureKey(null);
-      setHoveredEdge(null);
-      setHoveredPoint(null);
-      return;
-    }
-
-    const best = getClosestFeature(rawPoint);
-
-    if (best.dist <= 0.45) {
-      setHoveredFeatureKey(best.key);
-      setHoveredEdge(best.kind === "edge" ? best.edge : null);
-      setHoveredPoint(best.point);
-      return;
-    }
-
-    setHoveredFeatureKey(null);
-    setHoveredEdge(null);
-    setHoveredPoint(rawPoint);
-  }
-
-  function eventToPlanePoint(event, planeName) {
-    const rect = gl.domElement.getBoundingClientRect();
-    pointerRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    pointerRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-    raycasterRef.current.setFromCamera(pointerRef.current, camera);
-
-    const planeMesh = scene.getObjectByName(planeName);
-    if (!planeMesh) return null;
-
-    const hits = raycasterRef.current.intersectObject(planeMesh, false);
-    if (!hits.length) return null;
-
-    const p = hits[0].point;
-    const rawPoint = {
-      x: round2(p.x),
-      y: round2(p.y),
-      z: round2(p.z),
-    };
-
-    updateHoverFeature(rawPoint);
-    return snapPoint(rawPoint);
-  }
-
-  function handleGlobalDown(e) {
-    if (mode !== "drawGlobalFromCenter" || !creationPlane) return;
-    e.stopPropagation();
-
-    const p = eventToPlanePoint(e, "GLOBAL_CREATION_PLANE");
-    if (!p) return;
-
-    setSelectedId(null);
-
-    if (!waitingSecondClick) {
-      setDraftStart(p);
-      setDraftEnd(p);
-      setWaitingSecondClick(true);
-      return;
-    }
-
-    const finalEnd = p;
-    const previewRect = buildCenteredRect(
-      draftStart,
-      finalEnd,
-      creationPlane,
-      tool,
-      0.2,
-      1
-    );
-
-    if (previewRect.width > 0.01 && previewRect.height > 0.01) {
-      const { thickness, directionSign } = askThicknessAndDirectionForGlobal(
-        creationPlane.plane
-      );
-
-      addObject(
-        buildCenteredRect(
-          draftStart,
-          finalEnd,
-          creationPlane,
-          tool,
-          thickness,
-          directionSign
-        )
-      );
-    }
-
-    clearDraft();
-    setMode("select");
-  }
-
-  function handleGlobalMove(e) {
-    if (mode !== "drawGlobalFromCenter" || !creationPlane) return;
-    e.stopPropagation();
-
-    const p = eventToPlanePoint(e, "GLOBAL_CREATION_PLANE");
-    if (!p) return;
-
-    if (waitingSecondClick && draftStart) {
-      setDraftEnd(p);
-    }
-  }
-
-  function handleSketchDown(e) {
-    if (mode !== "drawSketch" || !sketchFace) return;
-    e.stopPropagation();
-
-    const p = eventToPlanePoint(e, "SKETCH_PLANE");
-    if (!p) return;
-
-    if (!waitingSecondClick) {
-      setDraftStart(p);
-      setDraftEnd(p);
-      setWaitingSecondClick(true);
-      return;
-    }
-
-    const finalEnd = p;
-
-    const temp = buildRectFromFacePoints(
-      draftStart,
-      finalEnd,
-      sketchFace,
-      tool,
-      0.2,
-      1
-    );
-
-    if (temp.width > 0.01 && temp.height > 0.01) {
-      const { thickness, directionSign } = askThicknessAndDirectionForSketch(
-        sketchFace
-      );
-
-      addObject(
-        buildRectFromFacePoints(
-          draftStart,
-          finalEnd,
-          sketchFace,
-          tool,
-          thickness,
-          directionSign
-        )
-      );
-    }
-
-    clearDraft();
-    setMode("select");
-  }
-
-  function handleSketchMove(e) {
-    if (mode !== "drawSketch" || !sketchFace) return;
-    e.stopPropagation();
-
-    const p = eventToPlanePoint(e, "SKETCH_PLANE");
-    if (!p) return;
-
-    if (waitingSecondClick && draftStart) {
-      setDraftEnd(p);
-    }
-  }
-
-  const draftGlobal =
-    mode === "drawGlobalFromCenter" && creationPlane && draftStart && draftEnd
-      ? getCenteredRectPreview(draftStart, draftEnd, creationPlane)
-      : null;
-
-  const draftSketch =
-    mode === "drawSketch" && sketchFace && draftStart && draftEnd
-      ? buildSketchPreview(draftStart, draftEnd, sketchFace)
-      : null;
-
-  const activePlane =
-    mode === "drawGlobalFromCenter" ? creationPlane : sketchFace;
-
-  return (
-    <>
-      <DynamicPlane
-        planeInfo={creationPlane}
-        visible={mode === "drawGlobalFromCenter"}
-        name="GLOBAL_CREATION_PLANE"
-        color="#60a5fa"
-        opacity={0.12}
-        onPointerDown={handleGlobalDown}
-        onPointerMove={handleGlobalMove}
-      />
-
-      <DynamicPlane
-        planeInfo={sketchFace}
-        visible={mode === "drawSketch"}
-        name="SKETCH_PLANE"
-        color="#38bdf8"
-        opacity={0.12}
-        onPointerDown={handleSketchDown}
-        onPointerMove={handleSketchMove}
-      />
-
-      {objects.map((obj) => (
-        <RectSolid
-          key={obj.id}
-          rect={obj}
-          isSelected={obj.id === selectedId}
-          mode={mode}
-          onSelect={setSelectedId}
-          onFaceClick={(e) => {
-            const faceInfo = extractFaceInfoFromHit(e);
-            onFacePicked(faceInfo);
-          }}
-        />
-      ))}
-
-      <CornerMarkers
-        points={featureDb.corners}
-        hoveredKey={hoveredFeatureKey}
-        visible={isDrawingMode}
-      />
-
-      <MidpointMarkers
-        points={featureDb.midpoints}
-        hoveredKey={hoveredFeatureKey}
-        visible={isDrawingMode}
-      />
-
-      <HoverEdge edge={hoveredEdge} visible={isDrawingMode} />
-      <HoverPoint point={hoveredPoint} visible={isDrawingMode} />
-
-      <GuideLines
-        start={draftStart}
-        current={draftEnd}
-        planeInfo={activePlane}
-        visible={isDrawingMode && !!draftStart && !!draftEnd}
-      />
-
-      {draftGlobal && (
-        <Line
-          points={getSketchCorners(draftGlobal)}
-          color="#0ea5e9"
-          lineWidth={2}
-        />
-      )}
-
-      {draftSketch && (
-        <Line
-          points={getSketchCorners(draftSketch)}
-          color="#0ea5e9"
-          lineWidth={2}
-        />
-      )}
-    </>
-  );
-}
+/* =========================
+   Main SceneEditor
+========================= */
 
 export default function SceneEditor({
-  objects,
-  addObject,
-  selectedId,
-  setSelectedId,
-  tool,
-  snapEnabled,
   mode,
-  setMode,
-  creationPlane,
-  sketchFace,
-  onFacePicked,
+  planesVisible,
+  currentPlane,
+  currentSketch,
+  sketches,
+  solids,
+  previewSolid,
+  selectedTreeId,
+  activeSketchTool,
+  setCurrentSketch,
+  onPlanePick,
+  selectedEntityRef,
+  onSelectEntity,
+  onApplyDimensionChange,
 }) {
-  const [viewPreset, setViewPreset] = useState("topRight");
+  const [viewPreset, setViewPreset] = useState("isoNE");
 
-  const isOrthoView =
-    viewPreset === "front" ||
-    viewPreset === "left" ||
-    viewPreset === "right" ||
-    viewPreset === "top" ||
-    viewPreset === "bottom";
-
-  const lockCamera =
-    mode === "drawGlobalFromCenter" ||
-    mode === "pickSketchFace" ||
-    mode === "drawSketch";
+  const ortho =
+    ["front", "top", "right", "left", "bottom"].includes(viewPreset) ||
+    mode === "editingSketch";
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100%" }}>
-      <ViewSelector3D
-        currentView={viewPreset}
-        onChangeView={setViewPreset}
-      />
+    <div className="scene-wrap">
+      <ViewCube currentView={viewPreset} onChange={setViewPreset} />
 
       <Canvas shadows>
-        {isOrthoView ? (
-          <OrthographicCamera
-            makeDefault
-            position={[20, 0, 0]}
-            zoom={45}
-            near={0.1}
-            far={1000}
+        {ortho ? (
+          <OrthographicCamera makeDefault position={[80, 80, 80]} zoom={8} />
+        ) : null}
+
+        <color attach="background" args={["#eef1f5"]} />
+        <ambientLight intensity={0.9} />
+        <directionalLight position={[60, 80, 40]} intensity={1.15} castShadow />
+
+        <BasePlanes
+          visiblePlanes={planesVisible}
+          highlightedPlaneId={
+            selectedTreeId?.startsWith("plane_")
+              ? selectedTreeId
+              : currentPlane?.id
+          }
+          onPlaneClick={onPlanePick}
+        />
+
+        {sketches.map((sk) => (
+          <SketchPreview
+            key={sk.id}
+            sketch={sk}
+            selectedEntityRef={selectedEntityRef}
+            onSelectEntity={onSelectEntity}
+            onApplyDimensionChange={onApplyDimensionChange}
+          />
+        ))}
+
+        {currentSketch && !sketches.some((s) => s.id === currentSketch.id) ? (
+          <SketchPreview
+            sketch={currentSketch}
+            selectedEntityRef={selectedEntityRef}
+            onSelectEntity={onSelectEntity}
+            onApplyDimensionChange={onApplyDimensionChange}
           />
         ) : null}
 
-        {!isOrthoView ? (
-          <perspectiveCamera
-            attach="camera"
-            position={[10, 8, 10]}
-            fov={50}
-            near={0.1}
-            far={1000}
+        {solids.map((solid) => (
+          <SolidView
+            key={solid.id}
+            solid={solid}
+            selected={selectedTreeId === solid.sourceFeatureId}
+            cutMode={solid.operation === "cut"}
+          />
+        ))}
+
+        {previewSolid ? (
+          <SolidView
+            solid={previewSolid}
+            selected
+            cutMode={previewSolid.operation === "cut"}
           />
         ) : null}
 
-        <color attach="background" args={["#f8fafc"]} />
-
-        <ambientLight intensity={0.55} />
-        <directionalLight
-          position={[12, 18, 10]}
-          intensity={1.4}
-          castShadow
-          shadow-mapSize-width={2048}
-          shadow-mapSize-height={2048}
-          shadow-camera-left={-30}
-          shadow-camera-right={30}
-          shadow-camera-top={30}
-          shadow-camera-bottom={-30}
-          shadow-camera-near={1}
-          shadow-camera-far={80}
-        />
-
-        <mesh
-          rotation={[-Math.PI / 2, 0, 0]}
-          position={[0, -0.001, 0]}
-          receiveShadow
-        >
-          <planeGeometry args={[200, 200]} />
-          <shadowMaterial opacity={0.18} />
-        </mesh>
-
-        <Grid
-          args={[100, 100]}
-          cellSize={1}
-          sectionSize={5}
-          cellThickness={0.5}
-          sectionThickness={1}
-          fadeDistance={80}
-          fadeStrength={1}
-          position={[0, 0.001, 0]}
-        />
-
-        <axesHelper args={[5]} />
-
-        <DrawingLayer
-          objects={objects}
-          addObject={addObject}
-          selectedId={selectedId}
-          setSelectedId={setSelectedId}
-          tool={tool}
-          snapEnabled={snapEnabled}
+        <PointerSketchLayer
           mode={mode}
-          setMode={setMode}
-          creationPlane={creationPlane}
-          sketchFace={sketchFace}
-          onFacePicked={onFacePicked}
+          currentPlane={currentPlane}
+          activeSketchTool={activeSketchTool}
+          currentSketch={currentSketch}
+          setCurrentSketch={setCurrentSketch}
         />
 
-        <CameraController
-          lockCamera={lockCamera}
-          sketchFace={sketchFace}
-          creationPlane={creationPlane}
-          mode={mode}
-          viewPreset={viewPreset}
-          isOrthoView={isOrthoView}
-        />
+        <CameraRig mode={mode} plane={currentPlane} viewPreset={viewPreset} />
       </Canvas>
     </div>
   );

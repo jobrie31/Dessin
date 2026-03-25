@@ -1,188 +1,384 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import TopRibbon from "./components/TopRibbon";
+import FeatureTree from "./components/FeatureTree";
+import PropertyPanel from "./components/PropertyPanel";
 import SceneEditor from "./components/SceneEditor";
-import Toolbar from "./components/Toolbar";
-
-function uid() {
-  return Math.random().toString(36).slice(2, 10);
-}
+import {
+  BASE_PLANES,
+  buildSolidFromExtrude,
+  nextBossName,
+  nextCutName,
+  nextSketchName,
+  uid,
+} from "./lib/cad";
 
 export default function App() {
-  const [tool, setTool] = useState("wall"); // floor | wall | roof
-  const [objects, setObjects] = useState([
-    {
-      id: uid(),
-      type: "floor",
-      center: { x: 0, y: 0.15, z: 0 },
-      width: 8,
-      height: 6,
-      thickness: 0.3,
-      plane: "XZ",
-      color: "#1d4ed8",
-      name: "Base 1",
-    },
-  ]);
+  const [activeTab, setActiveTab] = useState("Esquisse");
+  const [mode, setMode] = useState("idle");
+  const [activeSketchTool, setActiveSketchTool] = useState("rectangle");
+  const [planes] = useState(BASE_PLANES);
+  const [selectedTreeId, setSelectedTreeId] = useState("plane_front");
 
-  const [selectedId, setSelectedId] = useState(null);
-  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [sketches, setSketches] = useState([]);
+  const [features, setFeatures] = useState([]);
+  const [solids, setSolids] = useState([]);
 
-  const [mode, setMode] = useState("select");
-  // select | drawGlobalFromCenter | pickSketchFace | drawSketch
+  const [currentPlane, setCurrentPlane] = useState(null);
+  const [currentSketch, setCurrentSketch] = useState(null);
+  const [pendingFeature, setPendingFeature] = useState(null);
 
-  const [creationPlane, setCreationPlane] = useState(null);
-  // { plane: "XY" | "XZ" | "YZ", coord: 0 }
+  const [selectedEntityRef, setSelectedEntityRef] = useState(null);
+  // { sketchId, entityId }
 
-  const [sketchFace, setSketchFace] = useState(null);
-
-  const selectedObject = useMemo(
-    () => objects.find((o) => o.id === selectedId) || null,
-    [objects, selectedId]
+  const selectedSketch = useMemo(
+    () => sketches.find((s) => s.id === selectedTreeId) || null,
+    [sketches, selectedTreeId]
   );
 
-  function addObject(newObject) {
-    setObjects((prev) => {
-      const created = {
-        id: uid(),
-        name: `${labelType(newObject.type)} ${
-          prev.filter((o) => o.type === newObject.type).length + 1
-        }`,
-        color: colorByType(newObject.type),
-        ...newObject,
-      };
-      setSelectedId(created.id);
-      return [...prev, created];
-    });
+  const selectedFeature = useMemo(
+    () => features.find((f) => f.id === selectedTreeId) || null,
+    [features, selectedTreeId]
+  );
+
+  const sketchReadyForFeature = useMemo(() => {
+    if (currentSketch?.entities?.length) return currentSketch;
+    return selectedSketch;
+  }, [currentSketch, selectedSketch]);
+
+  const previewSolid = useMemo(() => {
+    if (!pendingFeature || !sketchReadyForFeature) return null;
+    return buildSolidFromExtrude(
+      pendingFeature,
+      sketchReadyForFeature,
+      pendingFeature.type === "extrudeBoss" ? "boss" : "cut"
+    );
+  }, [pendingFeature, sketchReadyForFeature]);
+
+  function startSketchOnPlane(planeCode) {
+    const plane = planes.find((p) => p.plane === planeCode);
+    if (!plane) return;
+
+    const sk = {
+      id: uid("sketch"),
+      name: nextSketchName(sketches),
+      plane: plane.plane,
+      planeId: plane.id,
+      coord: plane.coord,
+      entities: [],
+      dimensions: [],
+    };
+
+    setCurrentPlane(plane);
+    setCurrentSketch(sk);
+    setSelectedTreeId(plane.id);
+    setSelectedEntityRef(null);
+    setMode("editingSketch");
+    setActiveTab("Esquisse");
   }
 
-  function updateObject(id, patch) {
-    setObjects((prev) =>
-      prev.map((obj) => (obj.id === id ? { ...obj, ...patch } : obj))
+  function startSketchFromFace() {
+    setMode("pickFaceForSketch");
+    setActiveTab("Esquisse");
+    setSelectedEntityRef(null);
+  }
+
+  function finishSketch() {
+    if (!currentSketch || !currentSketch.entities.length) {
+      setMode("idle");
+      setCurrentSketch(null);
+      setCurrentPlane(null);
+      setSelectedEntityRef(null);
+      return;
+    }
+
+    setSketches((prev) => [...prev, currentSketch]);
+    setSelectedTreeId(currentSketch.id);
+    setCurrentSketch(null);
+    setCurrentPlane(null);
+    setSelectedEntityRef(null);
+    setMode("idle");
+  }
+
+  function ensureSketchSavedForFeature() {
+    if (currentSketch?.entities?.length) {
+      const sk = currentSketch;
+      setSketches((prev) => {
+        if (prev.some((x) => x.id === sk.id)) return prev;
+        return [...prev, sk];
+      });
+      setSelectedTreeId(sk.id);
+      setCurrentSketch(null);
+      setCurrentPlane(null);
+      setMode("idle");
+      return sk;
+    }
+
+    return selectedSketch;
+  }
+
+  function doBoss() {
+    const sketch = ensureSketchSavedForFeature();
+    if (!sketch) return;
+
+    setPendingFeature({
+      id: uid("feature"),
+      type: "extrudeBoss",
+      name: nextBossName(features),
+      sketchId: sketch.id,
+      depth: 10,
+      direction: 1,
+    });
+
+    setSelectedEntityRef(null);
+    setActiveTab("Fonctions");
+  }
+
+  function doCut() {
+    const sketch = ensureSketchSavedForFeature();
+    if (!sketch) return;
+
+    setPendingFeature({
+      id: uid("feature"),
+      type: "extrudeCut",
+      name: nextCutName(features),
+      sketchId: sketch.id,
+      depth: 10,
+      direction: 1,
+    });
+
+    setSelectedEntityRef(null);
+    setActiveTab("Fonctions");
+  }
+
+  function validatePendingFeature() {
+    if (!pendingFeature) return;
+
+    const sketch =
+      sketches.find((s) => s.id === pendingFeature.sketchId) ||
+      (currentSketch?.id === pendingFeature.sketchId ? currentSketch : null);
+
+    if (!sketch) return;
+
+    const solid = buildSolidFromExtrude(
+      pendingFeature,
+      sketch,
+      pendingFeature.type === "extrudeBoss" ? "boss" : "cut"
+    );
+    if (!solid) return;
+
+    setFeatures((prev) => [...prev, pendingFeature]);
+    setSolids((prev) => [...prev, solid]);
+    setSelectedTreeId(pendingFeature.id);
+    setPendingFeature(null);
+    setSelectedEntityRef(null);
+    setMode("idle");
+    setActiveTab("Fonctions");
+  }
+
+  function cancelPendingFeature() {
+    setPendingFeature(null);
+  }
+
+  function handleTreeSelect(id) {
+    setSelectedTreeId(id);
+    setSelectedEntityRef(null);
+  }
+
+  function handlePlanePick(plane) {
+    if (mode === "pickFaceForSketch") {
+      startSketchOnPlane(plane.plane);
+    } else {
+      setSelectedTreeId(plane.id);
+      setSelectedEntityRef(null);
+    }
+  }
+
+  function handleSelectEntity(sketchId, entityId) {
+    setSelectedEntityRef({ sketchId, entityId });
+  }
+
+  function updateEntityInState(sketchId, entityId, updater) {
+    if (currentSketch?.id === sketchId) {
+      setCurrentSketch((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          entities: prev.entities.map((entity) =>
+            entity.id === entityId ? updater(entity) : entity
+          ),
+        };
+      });
+      return;
+    }
+
+    setSketches((prev) =>
+      prev.map((sketch) =>
+        sketch.id !== sketchId
+          ? sketch
+          : {
+              ...sketch,
+              entities: sketch.entities.map((entity) =>
+                entity.id === entityId ? updater(entity) : entity
+              ),
+            }
+      )
     );
   }
 
-  function removeSelected() {
-    if (!selectedId) return;
-    setObjects((prev) => prev.filter((o) => o.id !== selectedId));
-    setSelectedId(null);
+  function deleteSelectedEntity() {
+    if (!selectedEntityRef) return;
+    const { sketchId, entityId } = selectedEntityRef;
+
+    if (currentSketch?.id === sketchId) {
+      setCurrentSketch((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          entities: prev.entities.filter((entity) => entity.id !== entityId),
+        };
+      });
+      setSelectedEntityRef(null);
+      return;
+    }
+
+    setSketches((prev) =>
+      prev.map((sketch) =>
+        sketch.id !== sketchId
+          ? sketch
+          : {
+              ...sketch,
+              entities: sketch.entities.filter((entity) => entity.id !== entityId),
+            }
+      )
+    );
+
+    setSelectedEntityRef(null);
   }
 
-  function startAddOnPlane(plane) {
-    setSelectedId(null);
-    setSketchFace(null);
-    setCreationPlane({ plane, coord: 0 });
-    setMode("drawGlobalFromCenter");
-  }
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.key === "Delete" || e.key === "Backspace") {
+        const tag = document.activeElement?.tagName?.toLowerCase();
+        const typing =
+          tag === "input" || tag === "textarea" || document.activeElement?.isContentEditable;
 
-  function startPickSketchFace() {
-    setCreationPlane(null);
-    setSketchFace(null);
-    setMode("pickSketchFace");
-  }
+        if (!typing && selectedEntityRef) {
+          e.preventDefault();
+          deleteSelectedEntity();
+        }
+      }
+    }
 
-  function onFacePicked(faceInfo) {
-    setCreationPlane(null);
-    setSketchFace(faceInfo);
-    setMode("drawSketch");
-  }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedEntityRef]);
 
-  function cancelCurrentAction() {
-    setMode("select");
-    setCreationPlane(null);
-    setSketchFace(null);
+  function applyDimensionChange(sketchId, entityId, dimType, rawValue) {
+    const value = Number(rawValue);
+    if (!Number.isFinite(value) || value <= 0) return;
+
+    updateEntityInState(sketchId, entityId, (entity) => {
+      if (entity.type === "line" && dimType === "length") {
+        const dx = entity.x2 - entity.x1;
+        const dy = entity.y2 - entity.y1;
+        const angle = Math.atan2(dy, dx);
+        return {
+          ...entity,
+          x2: entity.x1 + Math.cos(angle) * value,
+          y2: entity.y1 + Math.sin(angle) * value,
+        };
+      }
+
+      if (entity.type === "circle" && dimType === "diameter") {
+        return {
+          ...entity,
+          r: value / 2,
+        };
+      }
+
+      if (entity.type === "rectangle" && dimType === "width") {
+        const cx = (entity.x1 + entity.x2) / 2;
+        return {
+          ...entity,
+          x1: cx - value / 2,
+          x2: cx + value / 2,
+        };
+      }
+
+      if (entity.type === "rectangle" && dimType === "height") {
+        const cy = (entity.y1 + entity.y2) / 2;
+        return {
+          ...entity,
+          y1: cy - value / 2,
+          y2: cy + value / 2,
+        };
+      }
+
+      return entity;
+    });
   }
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <h1>Dessin</h1>
+    <div className="app">
+      <TopRibbon
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        mode={mode}
+        activeSketchTool={activeSketchTool}
+        setActiveSketchTool={setActiveSketchTool}
+        onStartSketchFromPlane={startSketchOnPlane}
+        onStartSketchFromFace={startSketchFromFace}
+        onFinishSketch={finishSketch}
+        onDoBoss={doBoss}
+        onDoCut={doCut}
+        canFinishSketch={mode === "editingSketch"}
+        canExtrude={!!sketchReadyForFeature}
+        canCut={!!sketchReadyForFeature}
+      />
 
-        <Toolbar
-          tool={tool}
-          setTool={setTool}
-          snapEnabled={snapEnabled}
-          setSnapEnabled={setSnapEnabled}
-          mode={mode}
-          startAddOnPlane={startAddOnPlane}
-          startPickSketchFace={startPickSketchFace}
-          cancelCurrentAction={cancelCurrentAction}
-          onDelete={removeSelected}
-          creationPlane={creationPlane}
-          sketchFace={sketchFace}
-          objects={objects}
-          selectedObjectId={selectedId}
-          onSelectObject={setSelectedId}
-        />
+      <div className="workspace">
+        <aside className="left-pane">
+          <FeatureTree
+            planes={planes}
+            sketches={sketches}
+            features={features}
+            selectedTreeId={selectedTreeId}
+            onSelectTreeItem={handleTreeSelect}
+          />
+        </aside>
 
-        <div className="piece-info-panel">
-          <div className="piece-info-title">Infos de la pièce</div>
+        <main className="center-pane">
+          <SceneEditor
+            mode={mode}
+            planesVisible
+            currentPlane={currentPlane}
+            currentSketch={currentSketch}
+            sketches={sketches}
+            solids={solids}
+            previewSolid={previewSolid}
+            selectedTreeId={selectedTreeId}
+            activeSketchTool={activeSketchTool}
+            setCurrentSketch={setCurrentSketch}
+            onPlanePick={handlePlanePick}
+            selectedEntityRef={selectedEntityRef}
+            onSelectEntity={handleSelectEntity}
+            onApplyDimensionChange={applyDimensionChange}
+          />
+        </main>
 
-          {!selectedObject ? (
-            <div className="piece-info-empty">
-              Clique une pièce pour voir ses informations.
-            </div>
-          ) : (
-            <div className="piece-info-content">
-              <div>
-                <strong>Nom :</strong> {selectedObject.name}
-              </div>
-              <div>
-                <strong>Type :</strong> {selectedObject.type}
-              </div>
-              <div>
-                <strong>Plan :</strong> {selectedObject.plane}
-              </div>
-
-              <div>
-                <strong>Centre X :</strong> {selectedObject.center?.x ?? 0}
-              </div>
-              <div>
-                <strong>Centre Y :</strong> {selectedObject.center?.y ?? 0}
-              </div>
-              <div>
-                <strong>Centre Z :</strong> {selectedObject.center?.z ?? 0}
-              </div>
-
-              <div>
-                <strong>Largeur :</strong> {selectedObject.width ?? 0}
-              </div>
-              <div>
-                <strong>Hauteur :</strong> {selectedObject.height ?? 0}
-              </div>
-              <div>
-                <strong>Épaisseur :</strong> {selectedObject.thickness ?? 0}
-              </div>
-            </div>
-          )}
-        </div>
-      </aside>
-
-      <main className="viewer">
-        <SceneEditor
-          objects={objects}
-          addObject={addObject}
-          selectedId={selectedId}
-          setSelectedId={setSelectedId}
-          tool={tool}
-          snapEnabled={snapEnabled}
-          mode={mode}
-          setMode={setMode}
-          creationPlane={creationPlane}
-          sketchFace={sketchFace}
-          onFacePicked={onFacePicked}
-        />
-      </main>
+        <aside className="right-pane">
+          <PropertyPanel
+            mode={mode}
+            currentSketch={currentSketch}
+            pendingFeature={pendingFeature}
+            setPendingFeature={setPendingFeature}
+            selectedSketch={selectedSketch}
+            selectedFeature={selectedFeature}
+            onValidatePendingFeature={validatePendingFeature}
+            onCancelPendingFeature={cancelPendingFeature}
+          />
+        </aside>
+      </div>
     </div>
   );
-}
-
-function labelType(type) {
-  if (type === "wall") return "Mur";
-  if (type === "roof") return "Toit";
-  return "Plancher";
-}
-
-function colorByType(type) {
-  if (type === "floor") return "#2563eb";
-  if (type === "wall") return "#16a34a";
-  if (type === "roof") return "#dc2626";
-  return "#64748b";
 }
